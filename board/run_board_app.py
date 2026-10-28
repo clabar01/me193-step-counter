@@ -3,13 +3,16 @@ without the board.
 
 It stands in for the board runtime (arduino.app_utils: App, Bridge, Logger) and
 feeds the app's imu_sample Bridge handler from an MQTT raw stream, e.g. the
-simulator. The app then buffers, classifies and publishes exactly as it does on
-the board, but under --prefix so the real topics are never touched. LED icon
-requests (Bridge.call "show_activity") are printed as the ASCII icon read from
-board/sketch/sketch.ino.
+simulator. The app then buffers, publishes and records trials exactly as it
+does on the board, but under --prefix so the real topics are never touched.
+LED icon requests (Bridge.call "show_icon") are printed as the ASCII icon read
+from board/sketch/sketch.ino when the icon changes.
+
+Trials are saved to --record-dir (default data/sim/, never data/raw/: this is
+not real data) and their JSON says where the samples came from.
 
 Usage (three terminals):
-    python training/simulator.py --topic ME193/ceci/steps/test/sim/raw --random
+    python training/simulator.py --speed normal --steps 40
     python board/run_board_app.py
     python dashboard/serve.py --query "prefix=ME193/ceci/steps/test"
 
@@ -33,7 +36,8 @@ REPO = Path(__file__).resolve().parent.parent
 
 APP_DIR = REPO / "board" / "python"
 SKETCH = REPO / "board" / "sketch" / "sketch.ino"
-FIELDS = ("t", "ax", "ay", "az", "gx", "gy", "gz")
+FIELDS = ("t", "ax", "ay", "az", "gx", "gy", "gz", "us_mm", "us_hit")
+DEFAULTS = {"us_mm": 1000, "us_hit": 0}     # a source without the ultrasonic = every ping timed out
 
 
 def read_icons():
@@ -72,6 +76,8 @@ def make_runtime(icons, deadline):
         def error(self, msg):
             self._log("ERROR", msg)
 
+    shown = [None]
+
     class Bridge:
         @staticmethod
         def provide(name, fn):
@@ -79,7 +85,8 @@ def make_runtime(icons, deadline):
 
         @staticmethod
         def call(name, *args):
-            if name == "show_activity":
+            if name == "show_icon" and args[0] != shown[0]:
+                shown[0] = args[0]
                 print(f"LED matrix -> {args[0]}\n{draw(args[0], icons)}", flush=True)
             return None
 
@@ -115,7 +122,7 @@ def feed(source, handlers):
         except ValueError:
             return
         for s in samples:
-            handlers["imu_sample"](*(s[k] for k in FIELDS))
+            handlers["imu_sample"](*(s.get(k, DEFAULTS.get(k)) for k in FIELDS))
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.on_message = on_message
@@ -129,6 +136,8 @@ def main():
     ap.add_argument("--prefix", default="ME193/ceci/steps/test",
                     help="topic prefix the app publishes under (never the real one by default)")
     ap.add_argument("--source", default=None, help="raw topic to read samples from (default <prefix>/sim/raw)")
+    ap.add_argument("--record-dir", type=Path, default=REPO / "data" / "sim",
+                    help="where trials are saved (default data/sim/)")
     ap.add_argument("--seconds", type=float, default=None, help="stop after this long")
     ap.add_argument("--icons", action="store_true", help="print the LED icons from the sketch and exit")
     args = ap.parse_args()
@@ -143,12 +152,14 @@ def main():
 
     source = args.source or f"{args.prefix}/sim/raw"
     os.environ["STEPS_TOPIC_PREFIX"] = args.prefix
+    os.environ["STEPS_RECORD_DIR"] = str(args.record_dir.resolve())
+    os.environ["STEPS_DATA_SOURCE"] = f"run_board_app.py on the laptop, fed from MQTT {source}"
     deadline = time.monotonic() + args.seconds if args.seconds else None
     handlers = make_runtime(icons, deadline)
     threading.Thread(target=feed, args=(source, handlers), daemon=True).start()
     print(f"board app on the laptop: reading {source}, publishing under {args.prefix}/", flush=True)
 
-    sys.path.insert(0, str(APP_DIR))       # so main.py finds live.py / features.py like on the board
+    sys.path.insert(0, str(APP_DIR))       # so main.py finds recorder.py like on the board
     os.chdir(APP_DIR)
     try:
         runpy.run_path(str(APP_DIR / "main.py"), run_name="__main__")

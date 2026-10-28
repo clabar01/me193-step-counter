@@ -1,48 +1,41 @@
-"""Publish simulated thigh-IMU samples to MQTT so the dashboard and live
-classifier can be tested without the hardware.
+"""Publish simulated thigh-IMU + ultrasonic samples to MQTT, so the board app,
+recorder and dashboard can be tested end-to-end without the hardware.
 
 *** FAKE DATA FOR TESTING ONLY. ***
 These signals are hand-made approximations, not recordings. Never put them in
 data/raw/, train on them, or report results from them.
 
-Message format (this is the format the Uno Q will use):
-    topic   ME193/ceci/steps/raw
-    rate    ~10 messages/s, 5 samples each (50 Hz)
-    payload JSON list of samples:
-        [{"t": 1240, "ax": 0.98, "ay": 0.01, "az": 0.12,
-          "gx": -0.4, "gy": 12.7, "gz": 0.9}, ...]
-    t is milliseconds since the stream started, accel is in g, gyro in deg/s.
+Message format (the board's, see board/python/main.py):
+    ~10 messages/s, 5 samples each (50 Hz), JSON list of samples:
+        [{"t": 1240, "ax": 0.98, "ay": 0.01, "az": 0.12, "gx": -0.4, "gy": 12.7,
+          "gz": 0.9, "us_mm": 112, "us_hit": 1}, ...]
+    t ms since the stream started, accel g, gyro deg/s; us_hit 0 -> us_mm 1000.
 
-Simulated activities. The sensor is on ONE thigh, so its swing repeats once
-per stride (2 steps). The gyro shows the stride rate; the accel also shows the
-step rate because of the sensor leg's strike plus a weaker pulse from the
-other foot halfway through the stride.
-    activity     stride Hz   gyro (thigh swing)   accel pulses
-    standing     -           ~0 (sway only)       none
-    walking      ~0.9        ~0.9 Hz              ~1.8 Hz (strike + other foot)
-    running      ~1.4        ~1.4 Hz              ~2.8 Hz (strike + other foot)
-    biking       ~1.2        ~1.2 Hz              ~1.2 Hz, small and smooth
-    air-biking   ~1.1        ~1.1 Hz              ~1.1 Hz, small and smooth
+Topics: by default it publishes to <prefix>/sim/raw, which board/run_board_app.py
+feeds into the real board app (that app then publishes <prefix>/raw, status and
+trial state, and records trials). --direct publishes to <prefix>/raw and
+<prefix>/status itself, for watching the dashboard plots without the board app
+(trials can't be recorded then).
 
-It also publishes a board-style status message every 5 s to
-ME193/ceci/steps/status (see board/python/main.py), so the dashboard's
-connection indicator works without the board.
+Walking with a known step count: each time a trial starts (<prefix>/trial/state
+goes to "recording") it stands for --lead-in s, walks exactly --steps steps at
+--speed, then stands again, and prints the true count and distance. Keys: w
+walks --steps steps now, s stands, q quits. --continuous walks all the time.
 
---pred also publishes fake predictions once per second to ME193/ceci/steps/pred,
-in the format the board will use (see CLAUDE.md):
-    {"t": <ms, last sample>, "model1": "walking", "model2": "walking",
-     "cadence_hz": 0.9}
-model2 is always the true activity (air-biking -> "biking"). model1 calls
-biking "walking" about PRED_M1_BIKING_MISS of the time, to mimic its expected
-weakness. cadence_hz is the stride rate (0 when standing).
-
-Keys while running:
-    s standing   w walking   r running   b biking   a air-biking   q quit
-
-Usage:
-    python training/simulator.py
-    python training/simulator.py --random --subject p2
-    python training/simulator.py --random --pred      # for the dashboard
+The model (sensor on the front of one thigh, HC-SR04 on its inner side pointing
+at the other thigh):
+  - thigh pitch = mean + swing * sin(2 pi phase), phase in strides (2 steps);
+    gy = d(pitch)/dt (positive = thigh swinging forward, as on the real sensor)
+  - heel strikes (= steps) just before each thigh's maximum forward swing:
+    this leg's at phase 0.22, the other leg's half a stride later, as spikes
+    mostly along the thigh (ax)
+  - the other thigh swings in antiphase; the beam hits it while the two thighs
+    are within BEAM_HALF_M of each other front-to-back, i.e. as they pass at
+    mid-stance, twice per stride: the distance dips to the gap between the
+    thighs. Otherwise the ping times out (us_mm 1000, us_hit 0), and the next
+    ping after a timeout is lost too (a real HC-SR04 holds Echo high ~38 ms).
+  - noise, a few dropped echoes, and a few stray echoes (arms, clothing)
+  - the ultrasonic value is one sample late, like the sketch's
 """
 
 import argparse
@@ -62,120 +55,160 @@ import paho.mqtt.client as mqtt
 
 BROKER = "broker.hivemq.com"
 PORT = 1883
-TOPIC = "ME193/ceci/steps/raw"
-PRED_TOPIC = "ME193/ceci/steps/pred"
-STATUS_TOPIC = "ME193/ceci/steps/status"
-PRED_PERIOD_S = 1        # one prediction per 1 s window step, like the board
-STATUS_PERIOD_S = 5
-PRED_M1_BIKING_MISS = 0.4   # fraction of biking predictions model1 gets wrong (says walking)
+PREFIX = "ME193/ceci/steps/test"
 FS = 50                  # sample rate, Hz
 BATCH = 5                # samples per message -> 10 messages/s
-RANDOM_PERIOD_S = 20     # seconds between activity changes with --random
-THIGH_RADIUS_M = 0.15    # hip joint to sensor, for tangential accel
-
-# Sensor axes, with the IMU on the front of the mid-thigh:
-#   x along the thigh, pointing toward the hip (reads +1 g standing)
-#   y lateral, pointing to the wearer's right (y = z x x, right-handed)
-#   z out of the front of the thigh
-# The thigh pitch is a rotation about +y, so gy = +d(pitch)/dt: positive when
-# sitting down or swinging the thigh forward, as on the real sensor.
-# 0 deg = thigh vertical,
-# 90 deg = thigh horizontal (seated), >90 deg = knee above hip (lying on back
-# with legs raised), which puts gravity on -x/+z instead of +x.
-#
-# freq      stride frequency of the sensor leg (pedal RPM / 60 for biking), Hz
-# pitch     mean thigh pitch, deg
-# swing     thigh swing amplitude around the mean, deg
-# impact    peak of the sensor leg's foot-strike pulse along x, g
-# other     other foot's strike, as a fraction of impact, half a stride later
-# width     pulse width (std dev), s
-ACTIVITIES = {
-    "standing":   dict(key="s", freq=0.0, pitch=0,   swing=0,  impact=0.0, other=0.0, width=0.03),
-    "walking":    dict(key="w", freq=0.9, pitch=5,   swing=18, impact=0.8, other=0.4, width=0.03),
-    "running":    dict(key="r", freq=1.4, pitch=15,  swing=35, impact=2.5, other=0.4, width=0.03),
-    "biking":     dict(key="b", freq=1.2, pitch=65,  swing=22, impact=0.1, other=0.0, width=0.12),
-    "air-biking": dict(key="a", freq=1.1, pitch=130, swing=25, impact=0.1, other=0.0, width=0.12),
-}
-KEYS = {p["key"]: name for name, p in ACTIVITIES.items()}
-
+STATUS_PERIOD_S = 5
+THIGH_RADIUS_M = 0.15    # hip joint to IMU, for tangential accel
+US_HEIGHT_M = 0.20       # hip joint to the ultrasonic beam
+BEAM_HALF_M = 0.05       # beam hits the other thigh within this front-to-back offset
+US_MAX_MM = 1000
+US_NOISE_MM = 3.0
+US_DROP = 0.04           # chance an echo off the thigh is missed anyway
+US_STRAY = 0.02          # chance of a stray echo when the thigh is out of the beam
+STRIKE_PHASE = 0.22      # this leg's heel strike, strides after the thighs pass
 ACCEL_NOISE_G = 0.015
 GYRO_NOISE_DPS = 1.0
+BLEND_S = 0.5            # how fast speed parameters change (mixed)
+
+# Sensor axes (same as the gait project): x along the thigh toward the hip
+# (+1 g standing), y to the wearer's right, z out of the front of the thigh.
+#
+# cadence   steps/min        swing    thigh swing amplitude, deg
+# pitch     mean thigh pitch while moving, deg (stairs: thigh raised)
+# impact    this leg's heel-strike spike along x, g; other = the other leg's, as a fraction
+# step_m    step length, m (for the true distance)
+SPEEDS = {
+    "slow":   dict(cadence=90,  swing=18, pitch=4,  impact=0.5, other=0.40, step_m=0.55),
+    "normal": dict(cadence=110, swing=23, pitch=5,  impact=0.8, other=0.40, step_m=0.70),
+    "fast":   dict(cadence=125, swing=27, pitch=6,  impact=1.2, other=0.40, step_m=0.80),
+    "jog":    dict(cadence=155, swing=33, pitch=12, impact=2.0, other=0.45, step_m=0.95),
+    "run":    dict(cadence=170, swing=38, pitch=15, impact=2.8, other=0.45, step_m=1.20),
+    "stairs": dict(cadence=95,  swing=28, pitch=28, impact=0.4, other=0.30, step_m=0.28),
+}
+MIXED_FROM = ("slow", "normal", "fast", "jog")
+MIXED_EVERY = (6, 12)    # mixed: new speed every this many steps
+PULSE_WIDTH_S = 0.03
 
 
-class ThighImuSim:
-    """Generates one 50 Hz sample at a time for the current activity."""
+class StepSim:
+    """One 50 Hz sample at a time; walk(n, speed) takes exactly n steps."""
 
     def __init__(self, subject, rng):
         self.rng = rng
         # The subject name seeds a fixed "person": same name, same person.
         srng = random.Random(zlib.crc32(subject.encode()))
         self.amp_scale = srng.uniform(0.85, 1.15)
-        self.cadence_scale = srng.uniform(0.90, 1.10)
-        self.mount_roll = math.radians(srng.uniform(-8, 8))  # strap tilt
+        self.cadence_scale = srng.uniform(0.92, 1.08)
+        self.mount_roll = math.radians(srng.uniform(-8, 8))   # strap tilt
         self.gyro_bias = [srng.gauss(0, 1.5) for _ in range(3)]
-        self.phase = 0.0  # in cycles
-        self.set_activity("standing")
+        self.gap_mm = srng.uniform(70, 130)                   # between the thighs at the beam
+        self.phase = 0.0          # strides
+        self.amp = 0.0            # 0 standing .. 1 walking
+        self.target_amp = 0.0
+        self.params = dict(SPEEDS["normal"])
+        self.target_params = dict(SPEEDS["normal"])
+        self.speed = None
+        self.steps_target = None  # None = walk forever
+        self.steps_done = 0
+        self.distance_m = 0.0
+        self.next_switch = None
+        self.done_callback = None
+        self.prev_pitch = None
+        self.prev_rate = 0.0
+        self.us_pending = (int(self.gap_mm), 1)
+        self.us_busy = 0
+        self._new_stride()
 
-    def set_activity(self, name):
-        self.name = name
-        self.p = ACTIVITIES[name]
-        # Each bout gets its own slightly different cadence.
-        self.bout_freq = self.p["freq"] * self.cadence_scale * self.rng.uniform(0.95, 1.05)
-        self._new_cycle()
+    # ---------- control ----------
 
-    def _new_cycle(self):
-        # Every stride / pedal stroke is a little different.
-        self.cycle_amp = self.amp_scale * self.rng.uniform(0.88, 1.12)
-        self.cycle_freq = self.bout_freq * self.rng.gauss(1.0, 0.03)
+    def walk(self, steps, speed, on_done=None):
+        """Start walking from standing: exactly `steps` steps (None = forever)."""
+        self.speed = speed
+        self.steps_target = steps
+        self.steps_done = 0
+        self.distance_m = 0.0
+        self.done_callback = on_done
+        self.phase = 0.0          # thighs side by side, as when standing
+        self.target_amp = 1.0
+        self._set_speed(self.rng.choice(MIXED_FROM) if speed == "mixed" else speed)
+        self.params = dict(self.target_params)
+        self.next_switch = self.rng.randint(*MIXED_EVERY) if speed == "mixed" else None
+
+    def stand(self):
+        self.target_amp = 0.0     # no further strikes are counted
+
+    def _set_speed(self, name):
+        self.current = name
+        self.target_params = dict(SPEEDS[name])
+
+    def _new_stride(self):
+        self.stride_amp = self.amp_scale * self.rng.uniform(0.9, 1.1)
+        self.stride_freq_jitter = self.rng.gauss(1.0, 0.03)
+
+    def _freq(self):
+        return self.params["cadence"] / 120 * self.cadence_scale * self.stride_freq_jitter
+
+    # ---------- one sample ----------
 
     def sample(self, t):
-        p = self.p
         dt = 1.0 / FS
+        rng = self.rng
+        k = min(1.0, dt / BLEND_S)
+        for key, target in self.target_params.items():
+            self.params[key] += (target - self.params[key]) * k
+        p = self.params
+        freq = self._freq()
 
-        prev_cycle = int(self.phase)
-        self.phase += self.cycle_freq * dt
-        if int(self.phase) != prev_cycle:
-            self._new_cycle()
+        # Amplitude ramps over half a stride when starting or stopping.
+        ramp = dt * 2 * max(freq, 0.7)
+        self.amp += max(-ramp, min(ramp, self.target_amp - self.amp))
+        moving = self.amp > 0 or self.target_amp > 0
 
-        w = 2 * math.pi * self.cycle_freq
-        theta = 2 * math.pi * self.phase
-        swing = math.radians(p["swing"]) * self.cycle_amp
+        pulse = 0.0
+        if moving:
+            old = self.phase
+            self.phase += freq * dt
+            if int(self.phase) != int(old):
+                self._new_stride()
+            # Heel strikes: step k (0-based) at 2 * (phase - STRIKE_PHASE) = k.
+            u_old, u = 2 * (old - STRIKE_PHASE), 2 * (self.phase - STRIKE_PHASE)
+            if self.target_amp > 0 and math.floor(u) > math.floor(u_old) and u >= 0:
+                self._on_step(p)
+            # Spike around the nearest strike c, only if it is (or will be) a counted step.
+            c = round(u)
+            upcoming = (u < c and self.target_amp > 0
+                        and (self.steps_target is None or c < self.steps_target))
+            if c >= 0 and (c < self.steps_done or upcoming):
+                d = abs(u - c) / (2 * freq)          # seconds from that strike
+                size = p["impact"] * (1.0 if c % 2 == 0 else p["other"])
+                pulse = size * self.stride_amp * math.exp(-0.5 * (d / PULSE_WIDTH_S) ** 2)
 
-        # Slow postural sway so standing isn't perfectly still.
-        sway_w = 2 * math.pi * 0.25
-        sway = math.radians(1.0) * math.sin(sway_w * t)
+        swing = math.radians(p["swing"]) * self.stride_amp * self.amp
+        mean = math.radians(p["pitch"]) * self.amp
+        s = math.sin(2 * math.pi * self.phase)
+        sway = math.radians(1.0) * math.sin(2 * math.pi * 0.25 * t)   # postural sway
+        pitch = mean + swing * s + sway
+        other_pitch = mean - swing * s
 
-        pitch = math.radians(p["pitch"]) + swing * math.sin(theta) + sway
-        pitch_rate = swing * w * math.cos(theta) + math.radians(1.0) * sway_w * math.cos(sway_w * t)
-        pitch_acc = -swing * w * w * math.sin(theta)
+        rate = 0.0 if self.prev_pitch is None else (pitch - self.prev_pitch) / dt
+        acc_ang = (rate - self.prev_rate) / dt
+        self.prev_pitch, self.prev_rate = pitch, rate
 
-        # Gravity in the sensor frame, plus tangential accel from the swing.
-        ax = math.cos(pitch)
-        az = math.sin(pitch) + THIGH_RADIUS_M * pitch_acc / 9.81
-
-        # Sensor leg's strike (or pedal push) at the start of each stride, plus
-        # the weaker other-foot strike half a stride later. Mostly along the thigh.
-        if p["impact"]:
-            frac = self.phase % 1.0
-            d_own = min(frac, 1.0 - frac) / self.cycle_freq        # seconds
-            d_other = abs(frac - 0.5) / self.cycle_freq
-            shape = (math.exp(-0.5 * (d_own / p["width"]) ** 2)
-                     + p["other"] * math.exp(-0.5 * (d_other / p["width"]) ** 2))
-            pulse = p["impact"] * self.cycle_amp * shape
-            ax += pulse
-            az += 0.3 * pulse
-
-        # A tilted strap leaks some of z into y.
-        r = self.mount_roll
+        ax = math.cos(pitch) + pulse
+        az = math.sin(pitch) + THIGH_RADIUS_M * acc_ang / 9.81 + 0.3 * pulse
+        r = self.mount_roll                     # a tilted strap leaks z into y
         ay = -az * math.sin(r)
         az = az * math.cos(r)
-
-        gy_true = math.degrees(pitch_rate)
-        gx = 0.1 * abs(gy_true) * math.sin(2 * theta)  # small hip rotation
+        gy_true = math.degrees(rate)
+        gx = 0.1 * abs(gy_true) * math.sin(4 * math.pi * self.phase)   # small hip rotation
         gy = gy_true * math.cos(r)
         gz = gy_true * math.sin(r)
 
-        n = self.rng.gauss
+        us_mm, us_hit = self.us_pending          # last sample's ping, like the sketch
+        self.us_pending = self._ping(pitch - sway, other_pitch)
+
+        n = rng.gauss
         return {
             "t": round(t * 1000),
             "ax": round(ax + n(0, ACCEL_NOISE_G), 4),
@@ -184,7 +217,36 @@ class ThighImuSim:
             "gx": round(gx + self.gyro_bias[0] + n(0, GYRO_NOISE_DPS), 2),
             "gy": round(gy + self.gyro_bias[1] + n(0, GYRO_NOISE_DPS), 2),
             "gz": round(gz + self.gyro_bias[2] + n(0, GYRO_NOISE_DPS), 2),
+            "us_mm": us_mm,
+            "us_hit": us_hit,
         }
+
+    def _on_step(self, p):
+        self.steps_done += 1
+        self.distance_m += p["step_m"]
+        if self.next_switch is not None and self.steps_done >= self.next_switch:
+            self._set_speed(self.rng.choice([s for s in MIXED_FROM if s != self.current]))
+            self.next_switch = self.steps_done + self.rng.randint(*MIXED_EVERY)
+        if self.steps_target is not None and self.steps_done >= self.steps_target:
+            self.target_amp = 0.0
+            if self.done_callback:
+                self.done_callback(self.steps_done, self.distance_m)
+
+    def _ping(self, pitch, other_pitch):
+        """(us_mm, us_hit) of one HC-SR04 ping at the other thigh."""
+        rng = self.rng
+        if self.us_busy:
+            self.us_busy -= 1
+            return US_MAX_MM, 0
+        offset = US_HEIGHT_M * (math.sin(pitch) - math.sin(other_pitch))   # front-to-back, m
+        if abs(offset) < BEAM_HALF_M and rng.random() > US_DROP:
+            mm = (self.gap_mm + 20 * (offset / BEAM_HALF_M) ** 2
+                  + 8 * math.sin(4 * math.pi * self.phase) + rng.gauss(0, US_NOISE_MM))
+            return int(min(max(mm, 20), US_MAX_MM - 1)), 1
+        if rng.random() < US_STRAY:
+            return int(rng.uniform(150, US_MAX_MM - 1)), 1
+        self.us_busy = 1          # no echo: the sensor ignores the next trigger
+        return US_MAX_MM, 0
 
 
 def read_keys(out):
@@ -200,45 +262,51 @@ def read_keys(out):
             out.put(sys.stdin.read(1))
 
 
-def make_client():
-    try:
-        return mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
-    except AttributeError:  # paho-mqtt < 2.0
-        return mqtt.Client()
-
-
-def fake_prediction(sim, t_ms):
-    """A prediction message for the current activity (FAKE, for the dashboard)."""
-    label = "biking" if sim.name == "air-biking" else sim.name
-    model1 = label
-    if label == "biking" and random.random() < PRED_M1_BIKING_MISS:
-        model1 = "walking"
-    cadence = 0.0 if sim.name == "standing" else round(sim.cycle_freq, 2)
-    return {"t": t_ms, "model1": model1, "model2": label, "cadence_hz": cadence}
-
-
 def main():
-    ap = argparse.ArgumentParser(description="Publish FAKE thigh-IMU data over MQTT (testing only).")
+    ap = argparse.ArgumentParser(description="Publish FAKE thigh IMU + ultrasonic data over MQTT (testing only).")
     ap.add_argument("--broker", default=BROKER)
     ap.add_argument("--port", type=int, default=PORT)
-    ap.add_argument("--topic", default=TOPIC)
+    ap.add_argument("--prefix", default=PREFIX, help=f"topic prefix (default {PREFIX})")
+    ap.add_argument("--speed", choices=list(SPEEDS) + ["mixed"], default="normal")
+    ap.add_argument("--steps", type=int, default=40, help="steps per walk (the true count)")
+    ap.add_argument("--lead-in", type=float, default=2.0,
+                    help="seconds of standing after a trial starts before walking")
+    ap.add_argument("--continuous", action="store_true", help="walk all the time; ignore trials")
+    ap.add_argument("--direct", action="store_true",
+                    help="publish <prefix>/raw and status like the board (no board app needed; no recording)")
     ap.add_argument("--subject", default="p1",
-                    help="fake person; each name gives a different amplitude, cadence and strap tilt")
-    ap.add_argument("--random", action="store_true",
-                    help=f"switch to a random activity every {RANDOM_PERIOD_S} s")
-    ap.add_argument("--activity", choices=ACTIVITIES, default="standing", help="starting activity")
-    ap.add_argument("--pred", action="store_true",
-                    help=f"also publish fake model predictions to {PRED_TOPIC}")
+                    help="fake person; each name gives a different amplitude, cadence, strap tilt and thigh gap")
+    ap.add_argument("--seed", type=int, help="random seed (repeatable noise)")
     args = ap.parse_args()
-    # pred/status topics sit next to the raw topic, so a test --topic
-    # (e.g. ME193/ceci/steps/test/raw) never touches the real ones
-    base = args.topic[:-len("/raw")] if args.topic.endswith("/raw") else args.topic
-    pred_topic, status_topic = f"{base}/pred", f"{base}/status"
+    if args.steps < 1:
+        ap.error("--steps must be at least 1")
 
-    sim = ThighImuSim(args.subject, random.Random())
-    sim.set_activity(args.activity)
+    raw_topic = f"{args.prefix}/raw" if args.direct else f"{args.prefix}/sim/raw"
+    state_topic = f"{args.prefix}/trial/state"
+    sim = StepSim(args.subject, random.Random(args.seed))
+    events = queue.Queue()        # from MQTT / keys to the sample loop
 
-    client = make_client()
+    def done(steps, distance):
+        print(f"  done: {steps} steps, {distance:.1f} m (TRUE count)", flush=True)
+
+    def on_connect(client, userdata, flags, reason_code, properties):
+        client.subscribe(state_topic)
+
+    last_state = [None]
+
+    def on_message(client, userdata, msg):
+        try:
+            state = json.loads(msg.payload)
+        except ValueError:
+            return
+        # Retained state from before we connected only sets the baseline.
+        prev, last_state[0] = last_state[0], state.get("state")
+        if prev is not None and prev != "recording" and state.get("state") == "recording":
+            events.put(("trial", state.get("name")))
+
+    client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+    client.on_connect = on_connect
+    client.on_message = on_message
     client.connect(args.broker, args.port)
     client.loop_start()
 
@@ -249,45 +317,54 @@ def main():
         tty.setcbreak(sys.stdin.fileno())
     threading.Thread(target=read_keys, args=(keys,), daemon=True).start()
 
-    print("FAKE IMU DATA - for testing only")
-    print(f"Publishing to {args.broker}:{args.port} {args.topic} as subject '{args.subject}'")
-    print("Keys: s standing  w walking  r running  b biking  a air-biking  q quit")
-    print(f"[   0.0s] {sim.name}")
+    print("FAKE IMU + ULTRASONIC DATA - for testing only")
+    print(f"Publishing to {args.broker}:{args.port} {raw_topic} as subject '{args.subject}'")
+    if args.continuous:
+        print(f"Walking continuously at {args.speed}")
+        sim.walk(None, args.speed)
+    else:
+        print(f"Each trial on {state_topic}: {args.lead_in:g} s standing, then {args.steps} steps at {args.speed}")
+    print("Keys: w walk now   s stand   q quit", flush=True)
 
     start = time.monotonic()
-    next_switch = RANDOM_PERIOD_S
+    walk_at = None
     n = 0
     batch = []
     try:
         while True:
             t = n / FS
-
             while not keys.empty():
                 ch = keys.get().lower()
                 if ch == "q":
                     return
-                if ch in KEYS:
-                    sim.set_activity(KEYS[ch])
-                    next_switch = t + RANDOM_PERIOD_S
-                    print(f"[{t:6.1f}s] {sim.name}")
-
-            if args.random and t >= next_switch:
-                sim.set_activity(random.choice([a for a in ACTIVITIES if a != sim.name]))
-                next_switch = t + RANDOM_PERIOD_S
-                print(f"[{t:6.1f}s] {sim.name} (random)")
+                if ch == "w":
+                    events.put(("key", None))
+                if ch == "s":
+                    sim.stand()
+                    walk_at = None
+                    print(f"[{t:7.1f}s] standing", flush=True)
+            while not events.empty():
+                kind, name = events.get()
+                if kind == "trial":
+                    print(f"[{t:7.1f}s] trial {name} started", flush=True)
+                    walk_at = t + args.lead_in
+                else:
+                    walk_at = t
+            if walk_at is not None and t >= walk_at and not args.continuous:
+                walk_at = None
+                print(f"[{t:7.1f}s] walking {args.steps} steps at {args.speed}", flush=True)
+                sim.walk(args.steps, args.speed, on_done=done)
 
             time.sleep(max(0.0, start + t - time.monotonic()))
             batch.append(sim.sample(t))
             n += 1
             if len(batch) == BATCH:
-                client.publish(args.topic, json.dumps(batch))
+                client.publish(raw_topic, json.dumps(batch))
                 batch = []
-            if args.pred and n % (FS * PRED_PERIOD_S) == 0:
-                client.publish(pred_topic, json.dumps(fake_prediction(sim, round(t * 1000))))
-            if n % (FS * STATUS_PERIOD_S) == 0:
-                client.publish(status_topic, json.dumps({
+            if args.direct and n % (FS * STATUS_PERIOD_S) == 0:
+                client.publish(f"{args.prefix}/status", json.dumps({
                     "wall": round(time.time(), 3), "t": round(t * 1000), "rate_hz": float(FS),
-                    "queued": 0, "dropped": 0, "mqtt": True, "mcu": "simulator"}))
+                    "queued": 0, "dropped": 0, "mqtt": True, "mcu": "simulator --direct"}))
     except KeyboardInterrupt:
         pass
     finally:

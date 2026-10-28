@@ -47,17 +47,67 @@ pip install -r requirements.txt
 
 | Folder | Contents |
 | --- | --- |
-| `board/` | App Lab app `me193_steps` (`sketch/`, `python/`), `deploy_board.sh`, `run_board_app.py`, `tools/i2c_scanner/` |
-| `data/raw/` | recordings from `training/logger.py` (gitignored) |
+| `board/` | App Lab app `me193_steps` (`sketch/`, `python/`), `deploy_board.sh`, `pull_recordings.py`, `run_board_app.py`, `tools/i2c_scanner/` |
+| `data/raw/` | trial recordings pulled from the board (gitignored) |
+| `data/sim/` | trials recorded from the simulator (gitignored, never used for training) |
 | `data/processed/` | windowed / feature data |
-| `training/` | logger, simulator, windowing, evaluation splits |
+| `training/` | simulator, windowing, evaluation splits |
 | `models/` | exported models |
-| `analysis/` | plotting scripts; figures in `analysis/figures/` |
-| `dashboard/` | live MQTT dashboard: `python dashboard/serve.py` |
+| `analysis/` | `plot_raw.py` (one trial); figures in `analysis/figures/` |
+| `dashboard/` | `trial.html` (record trials, live plots) and `dashboard.html`: `python dashboard/serve.py` |
 | `animation/` | 3D avatar (`avatar.glb`) and `shrink_glb.py` |
 | `docs/` | write-up |
 
-MQTT: `broker.hivemq.com:1883`, topics under `ME193/ceci/steps/`.
+MQTT: `broker.hivemq.com:1883`, topics under `ME193/ceci/steps/`:
+
+| Topic | From | Contents |
+| --- | --- | --- |
+| `raw` | board | 50 Hz samples, 5 per message: `t, ax, ay, az, gx, gy, gz, us_mm, us_hit` |
+| `status` | board | every 5 s: rate, ultrasonic echo %, MQTT queue, recording state |
+| `trial/cmd` | Trial page | `start` / `stop` / `save` / `discard` (fields in `board/python/main.py`) |
+| `trial/state` | board | retained: idle / recording / stopped, sample count, the answer to the last command |
+
+This is a public broker: anyone can read these topics or send a trial command.
+
+### Recording trials
+
+1. Power on the board (once `me193_steps` is deployed and set as the default app).
+2. `python dashboard/serve.py --lan` and open the printed `phone:` address on your
+   phone (same Wi-Fi as the laptop; the phone needs internet for the broker).
+3. Fill in the trial (type, speed, known distance for distance trials), press
+   **Start**, walk, press **Stop**, enter the steps you counted, **Save**.
+   The LED matrix shows the state: footprints = ready, blinking dot =
+   recording, ? = waiting for your count, check = saved, X = command refused.
+4. `python board/pull_recordings.py` copies finished trials into `data/raw/`
+   (`BOARD=arduino@192.168.1.173` if `AirFour.local` doesn't resolve).
+
+Each trial is `<session>_<trial>.csv` (`t_ms, ax, ay, az, gx, gy, gz, us_mm, us_hit`)
+plus `<session>_<trial>.json` (type, counted steps, distance, speed, phone steps,
+notes, sample count, missing samples, echo %, times). `us_hit = 0` means no echo
+within 1 m (the other thigh was out of the beam), and then `us_mm = 1000`. The
+ultrasonic values in a row are from the ping fired right after the previous row
+(`us_lag_samples: 1`). `python analysis/plot_raw.py data/raw/<name>.csv` plots one.
+
+### Simulator (no hardware)
+
+`training/simulator.py` makes **fake** thigh-IMU and ultrasonic data: the gyro
+swings once per stride, the accel spikes at each heel strike, and the ultrasonic
+distance dips each time the other thigh passes, with noise, missed echoes and
+stray echoes. Each time a trial starts it stands for 2 s, then walks exactly
+`--steps` steps at `--speed` and prints the true count. Three terminals:
+
+```bash
+python training/simulator.py --speed normal --steps 40     # also slow, fast, jog, run, stairs, mixed
+python board/run_board_app.py                              # the real board app, on the laptop
+python dashboard/serve.py --trial --query "prefix=ME193/ceci/steps/test"
+```
+
+Then record a trial on the Trial page and enter the count the simulator printed.
+Everything uses the `ME193/ceci/steps/test` topics, and trials are saved to
+`data/sim/`, never `data/raw/`. Other options: `--continuous` (walk all the time),
+`--direct` (publish straight to `<prefix>/raw`, for the plots without the board
+app), `--subject p2` (a different fake person), `--seed N` (repeatable noise).
+`python board/run_board_app.py --icons` prints the LED icons.
 
 ## Results
 

@@ -1,0 +1,637 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Step Trials</title>
+<link rel="icon" href="data:,">
+<!--
+  ME193 step counter: Trial panel. Records labeled trials on the board.
+  Start it with python dashboard/serve.py (add --lan to open it from a phone on
+  the same network; it prints the address). Needs internet for the broker.
+
+  MQTT over WebSockets on broker.hivemq.com, under ME193/ceci/steps/
+  (?prefix=ME193/ceci/steps/test for the simulator / board/run_board_app.py):
+    raw          [{t, ax, ..., gy, ..., us_mm, us_hit}, ...]  -> live plots
+    status       {wall, t, rate_hz, us_hit_pct, ...}           -> connection
+    trial/state  {state, name, samples, seconds, last_cmd, ...} (retained)
+    trial/cmd    <- this page publishes start / stop / save / discard
+  The commands and their fields are documented in board/python/main.py. The
+  board checks every command and answers in trial/state (last_cmd), and this
+  page shows that answer. This is a public broker, so keep notes free of
+  anything private.
+-->
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<style>
+  :root {
+    --bg: #f4f3f0;
+    --surface: #fcfcfb;
+    --border: #e4e3df;
+    --text: #0b0b0b;
+    --text-2: #52514e;
+    --muted: #8a8984;
+    --series-1: #2a78d6;
+    --miss: #c9c7c1;
+    --ok: #23a04a;
+    --warn: #d98a00;
+    --bad: #d64545;
+    --rec: #d64545;
+    --idle: #8a8984;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111110;
+      --surface: #1a1a19;
+      --border: #2e2e2b;
+      --text: #f0efec;
+      --text-2: #c3c2b7;
+      --muted: #8f8e86;
+      --series-1: #3987e5;
+      --miss: #4a4945;
+      --ok: #2fb35a;
+      --warn: #e09a1a;
+      --bad: #e05a5a;
+      --rec: #e05a5a;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111110;
+    --surface: #1a1a19;
+    --border: #2e2e2b;
+    --text: #f0efec;
+    --text-2: #c3c2b7;
+    --muted: #8f8e86;
+    --series-1: #3987e5;
+    --miss: #4a4945;
+    --ok: #2fb35a;
+    --warn: #e09a1a;
+    --bad: #e05a5a;
+    --rec: #e05a5a;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  main {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 12px 16px calc(24px + env(safe-area-inset-bottom));
+    display: grid;
+    gap: 12px;
+  }
+  header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  h1 { font-size: 20px; margin: 0; font-weight: 650; }
+  .sub { color: var(--text-2); font-size: 13px; }
+  .sub a { color: inherit; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 14px;
+  }
+  .conn { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-2); white-space: nowrap; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--idle); flex: none; }
+  .conn[data-state="ok"] .dot { background: var(--ok); }
+  .conn[data-state="warn"] .dot { background: var(--warn); }
+  .conn[data-state="bad"] .dot { background: var(--bad); }
+
+  .fields { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; }
+  .fields .wide { grid-column: 1 / -1; }
+  label { display: grid; gap: 4px; font-size: 13px; color: var(--text-2); }
+  input, select, textarea {
+    font: inherit;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px;
+    min-height: 44px;
+    width: 100%;
+  }
+  textarea { min-height: 64px; resize: vertical; }
+  input:focus, select:focus, textarea:focus { outline: 2px solid var(--series-1); outline-offset: -1px; }
+  .hint { font-size: 12px; color: var(--muted); }
+
+  .buttons { display: flex; gap: 10px; margin-top: 12px; }
+  button {
+    font: inherit;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    min-height: 52px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    flex: 1;
+  }
+  button.primary { background: var(--series-1); border-color: var(--series-1); color: #fff; }
+  button.stop { background: var(--rec); border-color: var(--rec); color: #fff; }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+  .rec-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+  .rec-badge { display: inline-flex; align-items: center; gap: 8px; font-weight: 650; color: var(--rec); }
+  .rec-badge .dot { background: var(--rec); animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0.2; } }
+  @media (prefers-reduced-motion: reduce) { .rec-badge .dot { animation: none; } }
+  .big { font-size: 44px; font-weight: 650; font-variant-numeric: tabular-nums; line-height: 1.1; }
+  .stats { display: flex; flex-wrap: wrap; gap: 4px 16px; color: var(--text-2); font-size: 14px; font-variant-numeric: tabular-nums; }
+  .name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 14px; }
+
+  #msg { font-size: 14px; min-height: 1.4em; margin: 0; }
+  #msg[data-kind="ok"] { color: var(--ok); }
+  #msg[data-kind="bad"] { color: var(--bad); }
+  #msg[data-kind="wait"] { color: var(--text-2); }
+
+  .plot-head { display: flex; justify-content: space-between; align-items: baseline; font-size: 13px; color: var(--text-2); margin-bottom: 4px; }
+  .plot-head strong { color: var(--text); font-weight: 600; }
+  .plot-head span:last-child { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  canvas { display: block; width: 100%; height: 130px; }
+  .plots { display: grid; gap: 14px; }
+
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Step trials</h1>
+      <div class="sub">ME193 step counter · <a href="dashboard.html" id="dashLink">dashboard</a></div>
+    </div>
+    <div id="conn" class="conn" data-state="idle" role="status" aria-live="polite">
+      <span class="dot"></span><span id="connText">Connecting…</span>
+    </div>
+  </header>
+
+  <!-- idle: set up and start a trial -->
+  <section class="card" id="setup" aria-label="New trial">
+    <div class="fields">
+      <label>Session
+        <input id="session" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="40" pattern="[A-Za-z0-9\-]{1,40}">
+      </label>
+      <label>Trial
+        <input id="trial" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="40" placeholder="next number" pattern="[A-Za-z0-9\-]{0,40}">
+      </label>
+      <label>Type
+        <select id="type">
+          <option value="count">count</option>
+          <option value="distance">distance</option>
+          <option value="test">test</option>
+        </select>
+      </label>
+      <label>Speed
+        <select id="speed">
+          <option>slow</option>
+          <option selected>normal</option>
+          <option>fast</option>
+          <option>jog</option>
+          <option>run</option>
+          <option>stairs</option>
+          <option>mixed</option>
+        </select>
+      </label>
+      <label id="distanceField">Known distance (m)
+        <input id="distance" type="number" inputmode="decimal" min="0" step="0.1">
+      </label>
+      <label>Phone step count
+        <input id="phone" type="number" inputmode="numeric" min="0" step="1" placeholder="optional">
+      </label>
+      <label class="wide">Notes
+        <textarea id="notes" maxlength="1000" placeholder="shoes, surface, anything odd"></textarea>
+      </label>
+    </div>
+    <div class="hint" id="nameHint"></div>
+    <div class="buttons">
+      <button id="startBtn" class="primary" type="button">Start</button>
+    </div>
+  </section>
+
+  <!-- recording -->
+  <section class="card" id="recording" aria-label="Recording" hidden>
+    <div class="rec-head">
+      <span class="rec-badge"><span class="dot"></span>Recording</span>
+      <span class="name" id="recName"></span>
+    </div>
+    <div class="big" id="recTime">0.0 s</div>
+    <div class="stats" id="recStats"></div>
+    <div class="buttons">
+      <button id="stopBtn" class="stop" type="button">Stop</button>
+    </div>
+  </section>
+
+  <!-- stopped: ask for the count -->
+  <section class="card" id="saving" aria-label="Save trial" hidden>
+    <div class="rec-head">
+      <strong>How many steps did you count?</strong>
+      <span class="name" id="saveName"></span>
+    </div>
+    <div class="stats" id="saveStats"></div>
+    <div class="fields" style="margin-top: 10px">
+      <label class="wide">Counted steps
+        <input id="counted" type="number" inputmode="numeric" min="0" step="1">
+      </label>
+      <label>Phone step count
+        <input id="savePhone" type="number" inputmode="numeric" min="0" step="1" placeholder="optional">
+      </label>
+      <label class="wide">Notes
+        <textarea id="saveNotes" maxlength="1000"></textarea>
+      </label>
+    </div>
+    <div class="buttons">
+      <button id="discardBtn" type="button">Discard</button>
+      <button id="saveBtn" class="primary" type="button">Save</button>
+    </div>
+  </section>
+
+  <p id="msg" role="status" aria-live="polite"></p>
+
+  <section class="card plots" aria-label="Live sensor plots">
+    <div>
+      <div class="plot-head"><span><strong>Ultrasonic</strong> distance to the other thigh (mm)</span><span id="usNow"></span></div>
+      <canvas id="usPlot" aria-label="Ultrasonic distance, last 10 seconds"></canvas>
+    </div>
+    <div>
+      <div class="plot-head"><span><strong>Thigh gyro</strong> gy (deg/s)</span><span id="gyNow"></span></div>
+      <canvas id="gyPlot" aria-label="Thigh gyro gy, last 10 seconds"></canvas>
+    </div>
+  </section>
+</main>
+
+<script>
+// ===================== CONFIG =====================
+const PREFIX = new URLSearchParams(location.search).get("prefix") || "ME193/ceci/steps";
+const CONFIG = {
+  brokerUrl: "wss://broker.hivemq.com:8884/mqtt",
+  topics: {
+    raw: `${PREFIX}/raw`,
+    status: `${PREFIX}/status`,
+    state: `${PREFIX}/trial/state`,
+    cmd: `${PREFIX}/trial/cmd`,
+  },
+  plotSeconds: 10,
+  echoWindowS: 2,         // "echo %" next to the plot
+  rawStaleMs: 2000,
+  statusStaleMs: 12000,   // board status comes every 5 s
+  cmdTimeoutMs: 6000,     // no answer from the board in this long -> say so
+  minRateHz: 45,
+};
+const NAME_RE = /^[A-Za-z0-9-]{1,40}$/;
+const SAVED_FIELDS = ["session", "type", "speed", "distance"];   // remembered in this browser
+
+const $ = (id) => document.getElementById(id);
+if (PREFIX !== "ME193/ceci/steps") $("dashLink").href = `dashboard.html?prefix=${encodeURIComponent(PREFIX)}`;
+
+// ===================== STATE =====================
+let client = null;
+let mqttUp = false;
+let status = null, statusAt = 0;
+let rawAt = 0;
+let trial = null;            // last trial/state message
+let pending = null;          // {id, cmd, at}
+let shownState = null;
+const samples = [];          // {t, gy, us, hit}
+const MAX_SAMPLES = (CONFIG.plotSeconds + 2) * 50;
+
+function today() {
+  const d = new Date();
+  return `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}${String(d.getDate()).padStart(2, "0")}`;
+}
+
+function loadFields() {
+  for (const f of SAVED_FIELDS) {
+    try {
+      const v = localStorage.getItem(`trial.${f}`);
+      if (v !== null) $(f).value = v;
+    } catch (e) { /* storage blocked: defaults */ }
+  }
+  if (!$("session").value) $("session").value = today();
+}
+
+function saveFields() {
+  for (const f of SAVED_FIELDS) {
+    try { localStorage.setItem(`trial.${f}`, $(f).value); } catch (e) { /* ignore */ }
+  }
+}
+
+function setMsg(text, kind = "") {
+  $("msg").textContent = text;
+  $("msg").dataset.kind = kind;
+}
+
+// ===================== MQTT =====================
+function connect() {
+  client = mqtt.connect(CONFIG.brokerUrl, {
+    clientId: `me193-trial-${Math.random().toString(16).slice(2, 10)}`,
+    reconnectPeriod: 2000,
+    connectTimeout: 10000,
+  });
+  client.on("connect", () => {
+    mqttUp = true;
+    client.subscribe([CONFIG.topics.raw, CONFIG.topics.status, CONFIG.topics.state]);
+    render();
+  });
+  client.on("close", () => { mqttUp = false; render(); });
+  client.on("offline", () => { mqttUp = false; render(); });
+  client.on("message", (topic, payload) => {
+    let msg;
+    try { msg = JSON.parse(payload.toString()); } catch (e) { return; }
+    const now = performance.now();
+    if (topic === CONFIG.topics.raw && Array.isArray(msg)) {
+      rawAt = now;
+      for (const s of msg) {
+        if (typeof s.t !== "number") continue;
+        samples.push({ t: s.t, gy: s.gy, us: s.us_mm, hit: s.us_hit === 1 });
+      }
+      if (samples.length > MAX_SAMPLES) samples.splice(0, samples.length - MAX_SAMPLES);
+    } else if (topic === CONFIG.topics.status) {
+      status = msg;
+      statusAt = now;
+      render();
+    } else if (topic === CONFIG.topics.state) {
+      onState(msg);
+    }
+  });
+}
+
+function onState(msg) {
+  trial = msg;
+  const last = msg.last_cmd;
+  if (pending && last && last.id === pending.id) {
+    setMsg(last.message, last.ok ? "ok" : "bad");
+    pending = null;
+  }
+  render();
+}
+
+function send(cmd, fields = {}) {
+  if (!client || !mqttUp) {
+    setMsg("Not connected to the broker.", "bad");
+    return;
+  }
+  const id = Math.random().toString(36).slice(2, 10);
+  pending = { id, cmd, at: performance.now() };
+  client.publish(CONFIG.topics.cmd, JSON.stringify({ cmd, id, ...fields }), { qos: 1 });
+  setMsg(`Sent ${cmd}…`, "wait");
+  render();
+}
+
+// ===================== ACTIONS =====================
+function optionalNumber(el, what, integer) {
+  const raw = el.value.trim();
+  if (raw === "") return null;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0 || (integer && !Number.isInteger(n))) {
+    throw new Error(`${what} must be ${integer ? "a whole number" : "a number"}.`);
+  }
+  return n;
+}
+
+function start() {
+  try {
+    const session = $("session").value.trim();
+    const trialName = $("trial").value.trim();
+    if (!NAME_RE.test(session)) throw new Error("Session: 1-40 letters, digits or '-'.");
+    if (trialName && !NAME_RE.test(trialName)) throw new Error("Trial: letters, digits or '-' (or empty for the next number).");
+    const type = $("type").value;
+    const distance = optionalNumber($("distance"), "Distance", false);
+    if (type === "distance" && !(distance > 0)) throw new Error("A distance trial needs the known distance.");
+    const phone = optionalNumber($("phone"), "Phone step count", true);
+    saveFields();
+    send("start", {
+      session, trial: trialName, type, speed: $("speed").value,
+      distance_m: distance,
+      phone_steps: phone, notes: $("notes").value.trim(),
+    });
+  } catch (e) {
+    setMsg(e.message, "bad");
+  }
+}
+
+function save() {
+  try {
+    const counted = optionalNumber($("counted"), "Counted steps", true);
+    const type = trial && trial.meta ? trial.meta.type : "count";
+    if (type === "count" && counted === null) throw new Error("Enter the steps you counted.");
+    send("save", {
+      counted_steps: counted,
+      phone_steps: optionalNumber($("savePhone"), "Phone step count", true),
+      notes: $("saveNotes").value.trim(),
+    });
+  } catch (e) {
+    setMsg(e.message, "bad");
+    $("counted").focus();
+  }
+}
+
+function discard() {
+  const name = trial && trial.name ? trial.name : "this trial";
+  if (confirm(`Discard ${name}? Its samples are deleted on the board.`)) send("discard");
+}
+
+// Keep the phone screen on while recording (only where the browser allows it:
+// https or localhost).
+let wakeLock = null;
+async function setWakeLock(on) {
+  try {
+    if (on && !wakeLock && "wakeLock" in navigator) {
+      wakeLock = await navigator.wakeLock.request("screen");
+      wakeLock.addEventListener("release", () => { wakeLock = null; });
+    } else if (!on && wakeLock) {
+      await wakeLock.release();
+      wakeLock = null;
+    }
+  } catch (e) { wakeLock = null; }
+}
+
+// ===================== RENDER =====================
+function connection(now) {
+  if (!mqttUp) return ["idle", "Connecting…"];
+  if (!status || now - statusAt > CONFIG.statusStaleMs) return ["bad", "No board"];
+  if (now - rawAt > CONFIG.rawStaleMs) return ["warn", "Board up, no samples"];
+  if (typeof status.rate_hz === "number" && status.rate_hz < CONFIG.minRateHz) {
+    return ["warn", `Low rate ${status.rate_hz.toFixed(0)} Hz`];
+  }
+  return ["ok", `Live · ${status.rate_hz.toFixed(0)} Hz`];
+}
+
+function boardReady(now) {
+  return mqttUp && status && now - statusAt <= CONFIG.statusStaleMs && trial !== null;
+}
+
+function fmtPct(p) { return p === null || p === undefined ? "–" : `${Math.round(p)}%`; }
+
+function render() {
+  const now = performance.now();
+  const [cs, ct] = connection(now);
+  $("conn").dataset.state = cs;
+  $("connText").textContent = ct;
+
+  if (pending && now - pending.at > CONFIG.cmdTimeoutMs) {
+    setMsg(`No answer from the board to "${pending.cmd}". Is the board app running?`, "bad");
+    pending = null;
+  }
+
+  const state = trial ? trial.state : null;
+  $("setup").hidden = !(state === null || state === "idle");
+  $("recording").hidden = state !== "recording";
+  $("saving").hidden = state !== "stopped";
+  $("distanceField").style.opacity = $("type").value === "distance" ? 1 : 0.55;
+
+  const busy = pending !== null;
+  $("startBtn").disabled = busy || !boardReady(now) || state !== "idle";
+  $("stopBtn").disabled = busy;
+  $("saveBtn").disabled = busy;
+  $("discardBtn").disabled = busy;
+
+  if (state === "idle" || state === null) {
+    const session = $("session").value.trim();
+    const t = $("trial").value.trim();
+    $("nameHint").textContent = !trial ? "Waiting for the board's trial state…"
+      : `Saves as ${session || "?"}_${t || "<next number>"}.csv + .json` +
+        (trial.last_saved ? ` · last saved: ${trial.last_saved}` : "");
+  }
+  if (state === "recording") {
+    $("recName").textContent = trial.name || "";
+    $("recTime").textContent = `${(trial.seconds || 0).toFixed(1)} s`;
+    $("recStats").textContent = `${trial.samples} samples · echo ${fmtPct(trial.us_hit_pct)}` +
+      (trial.missing_samples ? ` · ${trial.missing_samples} missing` : "");
+  }
+  if (state === "stopped") {
+    $("saveName").textContent = trial.name || "";
+    $("saveStats").textContent = `${(trial.seconds || 0).toFixed(1)} s · ${trial.samples} samples · ` +
+      `echo ${fmtPct(trial.us_hit_pct)}` + (trial.meta ? ` · ${trial.meta.type}, ${trial.meta.speed}` : "");
+  }
+  if (state !== shownState) {
+    if (state === "stopped") {
+      $("counted").value = "";
+      $("savePhone").value = trial.meta && trial.meta.phone_steps !== null ? trial.meta.phone_steps : "";
+      $("saveNotes").value = trial.meta ? trial.meta.notes || "" : "";
+      $("counted").focus();
+    }
+    if (state === "idle" && shownState === "stopped") {
+      $("trial").value = "";      // next trial gets the next number
+      $("phone").value = "";
+    }
+    setWakeLock(state === "recording" || state === "stopped");
+    shownState = state;
+  }
+}
+
+// ===================== PLOTS =====================
+function css(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+function fit(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.round(canvas.clientWidth * dpr), h = Math.round(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  return dpr;
+}
+
+function axes(ctx, W, H, pad, ticks, Y, dpr) {
+  ctx.font = `${11 * dpr}px system-ui, sans-serif`;
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "right";
+  for (const v of ticks) {
+    const y = Y(v);
+    ctx.strokeStyle = css("--border");
+    ctx.lineWidth = dpr;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(W - pad.r, y); ctx.stroke();
+    ctx.fillStyle = css("--muted");
+    ctx.fillText(String(v), pad.l - 6 * dpr, y);
+  }
+}
+
+function drawPlots() {
+  const newest = samples.length ? samples[samples.length - 1].t : 0;
+  const span = CONFIG.plotSeconds * 1000;
+  const fresh = performance.now() - rawAt <= CONFIG.rawStaleMs;
+
+  // Ultrasonic: echoes as dots, timeouts as faint ticks along the top.
+  {
+    const cv = $("usPlot"), dpr = fit(cv), ctx = cv.getContext("2d");
+    const W = cv.width, H = cv.height, pad = { l: 40 * dpr, r: 6 * dpr, t: 6 * dpr, b: 6 * dpr };
+    ctx.clearRect(0, 0, W, H);
+    const X = (t) => pad.l + (W - pad.l - pad.r) * (1 - (newest - t) / span);
+    const Y = (mm) => pad.t + (H - pad.t - pad.b) * (1 - mm / 1000);
+    axes(ctx, W, H, pad, [0, 250, 500, 750, 1000], Y, dpr);
+    const r = 2 * dpr;
+    for (const s of samples) {
+      if (newest - s.t > span) continue;
+      if (s.hit) {
+        ctx.fillStyle = css("--series-1");
+        ctx.beginPath(); ctx.arc(X(s.t), Y(s.us), r, 0, 2 * Math.PI); ctx.fill();
+      } else {
+        ctx.fillStyle = css("--miss");
+        ctx.fillRect(X(s.t) - dpr / 2, Y(1000), dpr, 6 * dpr);
+      }
+    }
+    const recent = samples.filter((s) => newest - s.t <= CONFIG.echoWindowS * 1000);
+    const hits = recent.filter((s) => s.hit);
+    const last = hits.length ? hits[hits.length - 1].us : null;
+    $("usNow").textContent = !fresh || !recent.length ? "" :
+      `echo ${Math.round(100 * hits.length / recent.length)}%` + (last !== null ? ` · last ${last} mm` : "");
+  }
+
+  // Gyro: a line, symmetric scale of at least +/-100 deg/s.
+  {
+    const cv = $("gyPlot"), dpr = fit(cv), ctx = cv.getContext("2d");
+    const W = cv.width, H = cv.height, pad = { l: 40 * dpr, r: 6 * dpr, t: 6 * dpr, b: 6 * dpr };
+    ctx.clearRect(0, 0, W, H);
+    const shown = samples.filter((s) => newest - s.t <= span && typeof s.gy === "number");
+    const peak = Math.max(100, ...shown.map((s) => Math.abs(s.gy)));
+    const lim = Math.ceil(peak / 100) * 100;
+    const X = (t) => pad.l + (W - pad.l - pad.r) * (1 - (newest - t) / span);
+    const Y = (v) => pad.t + (H - pad.t - pad.b) * (0.5 - v / (2 * lim));
+    axes(ctx, W, H, pad, [-lim, 0, lim], Y, dpr);
+    ctx.strokeStyle = css("--series-1");
+    ctx.lineWidth = 1.5 * dpr;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    let prevT = null;
+    for (const s of shown) {
+      if (prevT === null || s.t - prevT > 100) ctx.moveTo(X(s.t), Y(s.gy));   // break the line at gaps
+      else ctx.lineTo(X(s.t), Y(s.gy));
+      prevT = s.t;
+    }
+    ctx.stroke();
+    $("gyNow").textContent = fresh && shown.length ? `${Math.round(shown[shown.length - 1].gy)} deg/s` : "";
+  }
+}
+
+function frame() {
+  drawPlots();
+  render();
+  requestAnimationFrame(frame);
+}
+
+// ===================== START =====================
+loadFields();
+$("startBtn").addEventListener("click", start);
+$("stopBtn").addEventListener("click", () => send("stop"));
+$("saveBtn").addEventListener("click", save);
+$("discardBtn").addEventListener("click", discard);
+$("counted").addEventListener("keydown", (e) => { if (e.key === "Enter") save(); });
+for (const id of ["session", "trial", "type"]) $(id).addEventListener("input", render);
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible" && (shownState === "recording" || shownState === "stopped")) {
+    setWakeLock(true);    // the browser drops the lock when the page is hidden
+  }
+});
+if (typeof mqtt === "undefined") {
+  setMsg("Could not load the MQTT library (no internet?).", "bad");
+} else {
+  connect();
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
