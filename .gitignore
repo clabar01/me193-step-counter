@@ -222,7 +222,7 @@ __marimo__/
 # ME193 step counter additions
 .venv/
 .DS_Store
-# Raw recordings stay local (large, and include the FSR label channels).
+# Raw recordings stay local.
 data/raw/*
 !data/raw/.gitkeep
 # Simulator recordings are fake and never used for training.

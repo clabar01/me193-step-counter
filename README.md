@@ -14,13 +14,28 @@ _TBD_
 | --- | --- |
 | Arduino Uno Q ("AirFour") | Linux side runs Python, MCU side runs the sketch; they talk through Arduino_RouterBridge. |
 | MPU-6050 IMU (accel + gyro) | I2C 0x68, front of the mid-thigh. |
-| VL53L0X time-of-flight sensor | Inner ankle, pointing at the other ankle. |
-| 2x FSR | Under each heel. **Training labels only**, never a model input. |
+| HC-SR04 ultrasonic sensor | From [me193-sumo](https://github.com/clabar01/me193-sumo). On the same thigh strap, pointing at the other thigh. |
 | Power bank + fanny pack | Power and carry the Uno Q on the hip. |
+
+There are no foot sensors. Step labels come from trials where the steps are
+counted by hand.
 
 ## Wiring
 
-_TBD_
+MPU-6050: 3.3V, GND, and the Uno Q's SDA/SCL header pins (I2C 0x68).
+
+HC-SR04 (same wiring as me193-sumo). It runs at 5 V and its Echo output is 5 V,
+but the Uno Q's MCU pins are 3.3 V, so Echo goes through a 1 kΩ / 2 kΩ divider:
+
+```
+HC-SR04 VCC  ── 5V
+HC-SR04 GND  ── GND
+HC-SR04 Trig ── D2
+HC-SR04 Echo ── 1 kΩ ──┬── D3
+                       └── 2 kΩ ── GND
+```
+
+_TBD: final pin choice and cable routing on the strap._
 
 ## How to run
 
