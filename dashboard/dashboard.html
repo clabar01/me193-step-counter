@@ -1,0 +1,1283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gait Dashboard</title>
+<link rel="icon" href="data:,">
+<!--
+  ME193 live gait dashboard. Start it with python dashboard/serve.py (double-clicking
+  the file works too, but then only the stick figure avatar is available).
+  It subscribes (never publishes) to MQTT over WebSockets on broker.hivemq.com:
+    ME193/ceci/steps/pred    {t, model1, model2, cadence_hz}   -> avatar, cards, cadence
+    ME193/ceci/steps/raw     [{t, ax, ay, az, gx, gy, gz}, ...] -> accel plot, bike vs air-bike
+    ME193/ceci/steps/status  {wall, t, rate_hz, ...}           -> connection indicator
+  Test without the board: python training/simulator.py --random --pred
+  Keys: F fullscreen. Add ?name=Ceci to the file URL to skip the start screen.
+  Test mode: pick the true activity; every prediction that arrives while it is
+  selected counts as right or wrong for each model (accuracy on the cards).
+  "Switch player" returns to the name screen and resets the player; the MQTT
+  connection stays open so the next player sees live data immediately.
+  ?prefix=ME193/ceci/steps/test uses <prefix>/raw|pred|status instead (testing
+  with simulator.py --topic ME193/ceci/steps/test/raw).
+  3D avatar: three.js + animation/avatar.glb (see the 3D AVATAR module at the
+  end). Browsers block a double-clicked file from loading it, so serve the folder:
+  python dashboard/serve.py. Opened as a file, or if anything fails to load, the
+  stick figure is used. The 3D/Stick button switches by hand
+  (remembered in this browser); ?avatar=stick or ?avatar=3d overrides it.
+  The 3D view can be rotated (drag), zoomed (scroll/pinch) and moved
+  (right-drag/two fingers); Reset view or a double-click restores it.
+-->
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script type="importmap">
+{ "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+} }
+</script>
+<style>
+  :root {
+    --bg: #f4f3f0;
+    --surface: #fcfcfb;
+    --border: #e4e3df;
+    --text: #0b0b0b;
+    --text-2: #52514e;
+    --muted: #8a8984;
+    --figure: #1d1d1b;
+    --series-1: #2a78d6;
+    --c-standing: #2a78d6;
+    --c-walking: #eb6834;
+    --c-running: #1baf7a;
+    --c-biking: #eda100;
+    --ok: #23a04a;
+    --warn: #d98a00;
+    --bad: #d64545;
+    --idle: #8a8984;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #111110;
+      --surface: #1a1a19;
+      --border: #2e2e2b;
+      --text: #f0efec;
+      --text-2: #c3c2b7;
+      --muted: #8f8e86;
+      --figure: #f0efec;
+      --series-1: #3987e5;
+      --c-standing: #3987e5;
+      --c-walking: #d95926;
+      --c-running: #199e70;
+      --c-biking: #c98500;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #111110;
+    --surface: #1a1a19;
+    --border: #2e2e2b;
+    --text: #f0efec;
+    --text-2: #c3c2b7;
+    --muted: #8f8e86;
+    --figure: #f0efec;
+    --series-1: #3987e5;
+    --c-standing: #3987e5;
+    --c-walking: #d95926;
+    --c-running: #199e70;
+    --c-biking: #c98500;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  button, input { font: inherit; color: inherit; }
+
+  /* ---------- start screen ---------- */
+  .start[hidden] { display: none; }
+  .start {
+    position: fixed; inset: 0;
+    display: grid; place-items: center;
+    padding: 16px;
+  }
+  .start form {
+    width: min(520px, 100%);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    padding: clamp(24px, 4vw, 48px);
+    display: grid; gap: 16px;
+  }
+  .start h1 { margin: 0; font-size: clamp(1.6rem, 3vw, 2.4rem); }
+  .start label { font-size: 1.2rem; color: var(--text-2); }
+  .start input {
+    font-size: 1.6rem; padding: 14px 16px;
+    border: 2px solid var(--border); border-radius: 12px;
+    background: var(--bg);
+  }
+  .start input:focus { outline: none; border-color: var(--series-1); }
+  .start button {
+    font-size: 1.4rem; font-weight: 600; padding: 14px;
+    border: 0; border-radius: 12px; cursor: pointer;
+    background: var(--text); color: var(--bg);
+  }
+  .start .note { margin: 0; font-size: 0.95rem; color: var(--muted); }
+
+  /* ---------- main layout ---------- */
+  main {
+    height: 100vh;
+    padding: clamp(12px, 1.6vw, 28px);
+    display: grid;
+    gap: clamp(10px, 1.2vw, 20px);
+    grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+    grid-template-rows: auto auto minmax(0, 1fr) auto;
+    grid-template-areas:
+      "head   head"
+      "test   test"
+      "avatar side"
+      "models models";
+  }
+  main[hidden] { display: none; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: clamp(12px, 1.4vw, 24px);
+    min-width: 0; min-height: 0;
+  }
+  .k {
+    font-size: clamp(0.9rem, 1.3vw, 1.4rem);
+    color: var(--text-2);
+    font-weight: 500;
+  }
+
+  header {
+    grid-area: head;
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    flex-wrap: wrap;
+  }
+  .who { font-size: clamp(1.8rem, 3.6vw, 3.6rem); font-weight: 700; line-height: 1.05; }
+  .sub { font-size: clamp(0.9rem, 1.2vw, 1.2rem); color: var(--muted); }
+  .right { display: flex; align-items: center; gap: 12px; }
+  .conn {
+    display: inline-flex; align-items: center; gap: 10px;
+    font-size: clamp(1rem, 1.5vw, 1.5rem); font-weight: 600;
+    padding: 8px 16px; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--surface);
+  }
+  .conn .dot { width: 0.8em; height: 0.8em; border-radius: 50%; background: var(--idle); }
+  .conn[data-state="ok"] .dot { background: var(--ok); }
+  .conn[data-state="warn"] .dot { background: var(--warn); }
+  .conn[data-state="bad"] .dot { background: var(--bad); }
+  .conn[data-state="ok"] .dot { box-shadow: 0 0 0 0 var(--ok); animation: pulse 2s infinite; }
+  @keyframes pulse {
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ok) 60%, transparent); }
+    70% { box-shadow: 0 0 0 10px transparent; }
+    100% { box-shadow: 0 0 0 0 transparent; }
+  }
+  .fs {
+    font-size: clamp(0.9rem, 1.2vw, 1.2rem);
+    padding: 8px 14px; border-radius: 10px; cursor: pointer;
+    background: var(--surface); border: 1px solid var(--border);
+  }
+
+  .avatar { grid-area: avatar; position: relative; display: flex; flex-direction: column; }
+  .avatar canvas { flex: 1; width: 100%; min-height: 0; display: block; }
+  .avatar canvas[hidden] { display: none; }
+  .avatar-tools {
+    position: absolute; top: clamp(10px, 1.2vw, 18px); right: clamp(10px, 1.2vw, 18px);
+    display: flex; align-items: center; gap: 10px; z-index: 1;
+  }
+  .avatar-tools .note { font-size: clamp(0.8rem, 1vw, 1rem); color: var(--muted); text-align: right; }
+  .avatar-tools button[hidden] { display: none; }
+  #avatar3d { touch-action: none; cursor: grab; }
+  #avatar3d:active { cursor: grabbing; }
+  .caption {
+    font-size: clamp(1.2rem, 2.2vw, 2.4rem); font-weight: 600;
+    text-align: center; color: var(--text-2); padding-top: 6px;
+  }
+
+  .side { grid-area: side; display: flex; flex-direction: column; gap: clamp(10px, 1.2vw, 20px); min-height: 0; }
+  .cadence .big {
+    font-size: clamp(3rem, 7vw, 8rem); font-weight: 800; line-height: 1;
+    font-variant-numeric: tabular-nums; margin-top: 6px;
+  }
+  .cadence .unit { font-size: 0.32em; font-weight: 600; color: var(--text-2); }
+  .plot { flex: 1; display: flex; flex-direction: column; min-height: 160px; }
+  .plot canvas { flex: 1; width: 100%; min-height: 0; display: block; margin-top: 8px; }
+
+  .models {
+    grid-area: models;
+    display: grid; grid-template-columns: 1fr 1fr; gap: clamp(10px, 1.2vw, 20px);
+  }
+  .model { border-left: 12px solid var(--accent, var(--border)); }
+  .model .label {
+    display: flex; align-items: center; gap: 0.35em;
+    font-size: clamp(2.2rem, 5.2vw, 5.6rem); font-weight: 800; line-height: 1.1;
+    margin-top: 4px;
+  }
+  .model .swatch {
+    width: 0.5em; height: 0.5em; border-radius: 50%;
+    background: var(--accent, var(--border)); flex: none;
+  }
+  .model.stale .label { color: var(--muted); }
+  .model .acc {
+    margin-top: 6px;
+    font-size: clamp(1.1rem, 2vw, 2.2rem); font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+  .model .acc .of { font-weight: 500; color: var(--text-2); }
+
+  .testbar {
+    grid-area: test;
+    display: flex; align-items: center; flex-wrap: wrap; gap: 10px;
+  }
+  .testbar .k { margin-right: 6px; }
+  .testbar button {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: clamp(0.95rem, 1.3vw, 1.3rem); font-weight: 600;
+    padding: 8px 16px; border-radius: 999px; cursor: pointer;
+    background: var(--surface); border: 2px solid var(--border);
+  }
+  .testbar button .swatch { width: 0.7em; height: 0.7em; border-radius: 50%; background: var(--accent); }
+  .testbar button[aria-pressed="true"] { border-color: var(--text); background: var(--bg); }
+  .testbar button[data-truth=""] { color: var(--text-2); }
+
+  @media (max-width: 820px) {
+    main {
+      height: auto; min-height: 100vh;
+      grid-template-columns: minmax(0, 1fr);
+      grid-template-rows: auto;
+      grid-template-areas: "head" "test" "avatar" "models" "side";
+    }
+    .avatar { height: 55vh; }
+    .models { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div id="start" class="start">
+  <form id="startForm" autocomplete="off">
+    <h1>Gait classifier</h1>
+    <label for="nameInput">Enter your name</label>
+    <input id="nameInput" maxlength="40" required autofocus>
+    <button type="submit">Start</button>
+    <p class="note">Your name only appears on this screen. It is never sent anywhere.</p>
+  </form>
+</div>
+
+<main id="app" hidden>
+  <header>
+    <div>
+      <div class="who" id="who"></div>
+      <div class="sub">Live gait classifier · ME193</div>
+    </div>
+    <div class="right">
+      <div id="conn" class="conn" data-state="idle" role="status" aria-live="polite">
+        <span class="dot"></span><span id="connText">Connecting…</span>
+      </div>
+      <button id="switchBtn" class="fs" type="button" title="Back to the name screen for the next player">Switch player</button>
+      <button id="fsBtn" class="fs" type="button" title="Fullscreen (F)">Fullscreen</button>
+    </div>
+  </header>
+
+  <section class="testbar" aria-label="Test mode">
+    <span class="k">Test mode, true activity:</span>
+    <button type="button" data-truth="standing" aria-pressed="false" style="--accent: var(--c-standing)"><span class="swatch"></span>Standing</button>
+    <button type="button" data-truth="walking" aria-pressed="false" style="--accent: var(--c-walking)"><span class="swatch"></span>Walking</button>
+    <button type="button" data-truth="running" aria-pressed="false" style="--accent: var(--c-running)"><span class="swatch"></span>Running</button>
+    <button type="button" data-truth="biking" aria-pressed="false" style="--accent: var(--c-biking)"><span class="swatch"></span>Biking</button>
+    <button type="button" data-truth="" aria-pressed="true">Off</button>
+  </section>
+
+  <section class="avatar card" aria-label="Avatar driven by Model 2">
+    <div class="avatar-tools">
+      <span id="avatarNote" class="note"></span>
+      <button id="viewBtn" class="fs" type="button" hidden title="Drag to rotate, scroll or pinch to zoom, right-drag or two fingers to move">Reset view</button>
+      <button id="avatarBtn" class="fs" type="button" hidden>Stick figure</button>
+    </div>
+    <canvas id="avatar"></canvas>
+    <canvas id="avatar3d" hidden></canvas>
+    <div id="caption" class="caption">Waiting for predictions…</div>
+  </section>
+
+  <section class="side">
+    <div class="card cadence">
+      <div class="k">Cadence</div>
+      <div class="big"><span id="cadVal">—</span> <span id="cadUnit" class="unit"></span></div>
+    </div>
+    <div class="card plot">
+      <div class="k">Accel magnitude (g), last 10 s</div>
+      <canvas id="plot" aria-label="Accel magnitude over the last 10 seconds"></canvas>
+    </div>
+  </section>
+
+  <section class="models">
+    <div class="card model stale" id="m1">
+      <div class="k">Model 1: peak accel</div>
+      <div class="label"><span class="swatch"></span><span class="txt" aria-live="polite">—</span></div>
+      <div class="acc" hidden></div>
+    </div>
+    <div class="card model stale" id="m2">
+      <div class="k">Model 2: all IMU</div>
+      <div class="label"><span class="swatch"></span><span class="txt" aria-live="polite">—</span></div>
+      <div class="acc" hidden></div>
+    </div>
+  </section>
+</main>
+
+<script>
+// ===================== CONFIG =====================
+const CONFIG = {
+  brokerUrl: "wss://broker.hivemq.com:8884/mqtt",
+  topics: {
+    raw: "ME193/ceci/steps/raw",
+    pred: "ME193/ceci/steps/pred",
+    status: "ME193/ceci/steps/status",
+  },
+  plotSeconds: 10,
+  bikeWindowMs: 2000,     // gravity direction for upright vs air-bike, from raw t
+  airBikeBelowAx: -0.3,   // mean ax (g) below this -> lying on back (knee above hip)
+  uprightAboveAx: 0.1,    // mean ax (g) above this -> sitting on a bike
+  predStaleMs: 4000,      // no prediction for this long -> show "waiting"
+  rawStaleMs: 2000,       // no raw samples for this long -> data not flowing
+  statusStaleMs: 12000,   // board status comes every 5 s
+  minRateHz: 45,
+  cadenceTauS: 1.5,       // smoothing time constant for the animation speed
+  blendMs: 600,           // pose change cross-fade
+};
+
+const testPrefix = new URLSearchParams(location.search).get("prefix");
+if (testPrefix) {
+  for (const k of Object.keys(CONFIG.topics)) CONFIG.topics[k] = `${testPrefix}/${k}`;
+}
+
+// ===================== HEAD PHOTO PLACEHOLDER =====================
+// To show a face instead of the plain head circle: put a photo (roughly square,
+// face centred) in the same folder as this file and set its name here, e.g.
+//   const HEAD_PHOTO = "face.png";
+// It is drawn clipped to the head circle, and on the 3D avatar as a round
+// sprite that follows the head bone. Leave "" for the plain head.
+const HEAD_PHOTO = "";
+// ==================================================================
+
+const ACTIVITIES = {
+  standing: { text: "Standing", color: "--c-standing" },
+  walking:  { text: "Walking",  color: "--c-walking" },
+  running:  { text: "Running",  color: "--c-running" },
+  biking:   { text: "Biking",   color: "--c-biking" },
+};
+const DEFAULT_CADENCE = { walking: 0.9, running: 1.4, biking: 1.2 };
+
+const $ = (id) => document.getElementById(id);
+const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+// ---------------- player (name stays in this object only) ----------------
+// Everything that belongs to one player. "Switch player" replaces it with a
+// fresh one, so per-player stats (and a per-player face photo) added here
+// reset together.
+function newPlayer(name) {
+  return {
+    name,
+    photo: HEAD_PHOTO ? Object.assign(new Image(), { src: HEAD_PHOTO }) : null,
+    // test mode: the true activity selected (null = off) and right/total per model
+    test: { truth: null, m1: { right: 0, total: 0 }, m2: { right: 0, total: 0 } },
+  };
+}
+let player = newPlayer("");
+
+// ---------------- data stream state (shared by all players) ----------------
+let client = null;
+let mqttUp = false;
+let pred = null, predAt = 0;
+let status = null, statusAt = 0;
+let rawAt = 0;
+const raw = [];               // {t, mag, ax}
+let bikeVariant = "upright";  // "upright" | "air"
+
+// ---------------- start screen ----------------
+let animating = false;
+
+function start(name) {
+  name = name.trim().slice(0, 40);
+  if (!name) return;
+  player = newPlayer(name);
+  renderTest();
+  $("who").textContent = player.name;
+  $("start").hidden = true;
+  $("app").hidden = false;
+  if (!client) connect();          // once; kept open across players
+  if (!animating) { animating = true; requestAnimationFrame(frame); }
+}
+
+function switchPlayer() {
+  player = newPlayer("");
+  renderTest();
+  $("who").textContent = "";
+  $("nameInput").value = "";
+  $("app").hidden = true;
+  $("start").hidden = false;
+  $("nameInput").focus();
+  // drop ?name= so a reload doesn't bring the previous player back
+  const url = new URL(location.href);
+  if (url.searchParams.has("name")) {
+    url.searchParams.delete("name");
+    history.replaceState(null, "", url);
+  }
+}
+$("startForm").addEventListener("submit", (e) => { e.preventDefault(); start($("nameInput").value); });
+$("switchBtn").addEventListener("click", switchPlayer);
+const urlName = new URLSearchParams(location.search).get("name");
+if (urlName) start(urlName);
+
+// ---------------- fullscreen ----------------
+function toggleFullscreen() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen?.();
+}
+$("fsBtn").addEventListener("click", toggleFullscreen);
+document.addEventListener("keydown", (e) => {
+  if (e.target.tagName === "INPUT") return;
+  if (e.key === "f" || e.key === "F") toggleFullscreen();
+});
+document.addEventListener("fullscreenchange", () => {
+  $("fsBtn").textContent = document.fullscreenElement ? "Exit fullscreen" : "Fullscreen";
+});
+
+// ---------------- MQTT (subscribe only, never publish) ----------------
+function connect() {
+  const clientId = "me193dash_" + Math.random().toString(16).slice(2, 10);
+  client = mqtt.connect(CONFIG.brokerUrl, {
+    clientId, clean: true, reconnectPeriod: 2000, connectTimeout: 10000,
+  });
+  const decoder = new TextDecoder();
+  client.on("connect", () => {
+    mqttUp = true;
+    client.subscribe(Object.values(CONFIG.topics));
+  });
+  client.on("close", () => { mqttUp = false; });
+  client.on("offline", () => { mqttUp = false; });
+  client.on("message", (topic, payload) => {
+    let msg;
+    try { msg = JSON.parse(decoder.decode(payload)); } catch { return; }
+    const now = performance.now();
+    if (topic === CONFIG.topics.raw && Array.isArray(msg)) onRaw(msg, now);
+    else if (topic === CONFIG.topics.pred && msg && msg.model2) { pred = msg; predAt = now; scorePrediction(msg); }
+    else if (topic === CONFIG.topics.status && msg) { status = msg; statusAt = now; }
+  });
+}
+
+function onRaw(samples, now) {
+  for (const s of samples) {
+    if (typeof s.t !== "number") continue;
+    if (raw.length && s.t <= raw[raw.length - 1].t) raw.length = 0;   // stream restarted
+    raw.push({ t: s.t, mag: Math.hypot(s.ax, s.ay, s.az), ax: s.ax });
+  }
+  if (!raw.length) return;
+  rawAt = now;
+  const newest = raw[raw.length - 1].t;
+  const keepFrom = newest - CONFIG.plotSeconds * 1000;
+  let drop = 0;
+  while (drop < raw.length && raw[drop].t < keepFrom) drop++;
+  if (drop) raw.splice(0, drop);
+
+  // Upright bike vs air-bike from where gravity points over the last ~2 s:
+  // lying on your back with the knee above the hip turns body x (knee->hip) downward.
+  let sum = 0, n = 0;
+  for (let i = raw.length - 1; i >= 0 && raw[i].t >= newest - CONFIG.bikeWindowMs; i--) { sum += raw[i].ax; n++; }
+  if (n) {
+    const ax = sum / n;
+    if (ax < CONFIG.airBikeBelowAx) bikeVariant = "air";
+    else if (ax > CONFIG.uprightAboveAx) bikeVariant = "upright";
+  }
+}
+
+// ---------------- test mode ----------------
+// While a true activity is selected, each prediction that arrives counts once
+// as right or wrong for each model. Counts live in player.test, so they carry
+// across activity changes and reset on Switch player.
+function scorePrediction(msg) {
+  const test = player.test;
+  if (!test.truth) return;
+  for (const [key, label] of [["m1", msg.model1], ["m2", msg.model2]]) {
+    test[key].total += 1;
+    if (label === test.truth) test[key].right += 1;
+  }
+  renderTest();
+}
+
+function renderTest() {
+  const test = player.test;
+  for (const btn of document.querySelectorAll(".testbar button")) {
+    btn.setAttribute("aria-pressed", String((btn.dataset.truth || null) === test.truth));
+  }
+  for (const key of ["m1", "m2"]) {
+    const el = $(key).querySelector(".acc");
+    const { right, total } = test[key];
+    if (!total) {
+      el.hidden = !test.truth;
+      el.textContent = "Testing: waiting for predictions…";
+      continue;
+    }
+    el.hidden = false;
+    el.innerHTML = `${Math.round(100 * right / total)}% right <span class="of">(${right}/${total})${test.truth ? "" : " · paused"}</span>`;
+  }
+}
+
+for (const btn of document.querySelectorAll(".testbar button")) {
+  btn.addEventListener("click", () => {
+    const truth = btn.dataset.truth || null;
+    player.test.truth = player.test.truth === truth ? null : truth;   // click again to stop
+    renderTest();
+  });
+}
+
+// ---------------- avatar mode: 3D or stick figure ----------------
+// The 3D avatar is built by the module script at the end of this file. Until it
+// has loaded, and for good if it can't (opened as a file, no internet, missing
+// animation/avatar.glb), the stick figure is drawn.
+let avatarWant = avatarPref();     // "3d" | "stick": the viewer's choice
+let avatar3d = null;               // {update(name, cadenceHz, bikeAlpha, dt, photo)} once loaded
+let avatar3dState = "loading";     // "loading" | "ready" | "failed"
+let avatar3dError = "";
+
+function avatarPref() {
+  const q = new URLSearchParams(location.search).get("avatar");
+  if (q === "3d" || q === "stick") return q;
+  try { return localStorage.getItem("me193.avatar") === "stick" ? "stick" : "3d"; } catch { return "3d"; }
+}
+
+function use3d() { return avatarWant === "3d" && avatar3dState === "ready"; }
+
+function renderAvatarMode() {
+  const on3d = use3d();
+  $("avatar").hidden = on3d;
+  $("avatar3d").hidden = !on3d;
+  const btn = $("avatarBtn");
+  btn.hidden = avatar3dState !== "ready";
+  btn.textContent = on3d ? "Stick figure" : "3D avatar";
+  $("viewBtn").hidden = !on3d;
+  let note = "";
+  if (avatarWant === "3d" && avatar3dState === "loading") note = "Loading 3D…";
+  if (avatarWant === "3d" && avatar3dState === "failed") note = `3D off: ${avatar3dError}`;
+  $("avatarNote").textContent = note;
+}
+
+$("avatarBtn").addEventListener("click", () => {
+  avatarWant = use3d() ? "stick" : "3d";
+  try { localStorage.setItem("me193.avatar", avatarWant); } catch {}
+  renderAvatarMode();
+});
+
+$("viewBtn").addEventListener("click", () => avatar3d?.resetView());
+
+// called by the 3D module
+window.avatar3dReady = (api) => { avatar3d = api; avatar3dState = "ready"; renderAvatarMode(); };
+window.avatar3dFailed = (why) => { avatar3dState = "failed"; avatar3dError = why; renderAvatarMode(); };
+renderAvatarMode();
+
+// ---------------- connection indicator ----------------
+function connectionState(now) {
+  if (!mqttUp) return ["idle", "Connecting to broker…"];
+  if (!status || now - statusAt > CONFIG.statusStaleMs) return ["bad", "No board"];
+  if (now - rawAt > CONFIG.rawStaleMs) return ["warn", "Board up, no data"];
+  const hz = status.rate_hz;
+  if (typeof hz === "number" && hz < CONFIG.minRateHz) return ["warn", `Low rate ${hz.toFixed(0)} Hz`];
+  return ["ok", `Live · ${typeof hz === "number" ? hz.toFixed(0) : "50"} Hz`];
+}
+
+// ---------------- cards + cadence ----------------
+function predFresh(now) { return pred && now - predAt <= CONFIG.predStaleMs; }
+
+function setCard(id, label) {
+  const card = $(id), act = ACTIVITIES[label];
+  const txt = act ? act.text : "—";
+  const el = card.querySelector(".txt");
+  if (el.textContent !== txt) el.textContent = txt;
+  card.classList.toggle("stale", !act);
+  card.style.setProperty("--accent", act ? `var(${act.color})` : "var(--border)");
+}
+
+function updatePanels(now) {
+  const fresh = predFresh(now);
+  setCard("m1", fresh ? pred.model1 : null);
+  setCard("m2", fresh ? pred.model2 : null);
+
+  let val = "—", unit = "";
+  if (fresh && typeof pred.cadence_hz === "number" && pred.cadence_hz > 0) {
+    if (pred.model2 === "walking" || pred.model2 === "running") {
+      val = Math.round(2 * pred.cadence_hz * 60); unit = "steps/min";
+    } else if (pred.model2 === "biking") {
+      val = Math.round(pred.cadence_hz * 60); unit = "RPM";
+    }
+  }
+  if ($("cadVal").textContent !== String(val)) $("cadVal").textContent = val;
+  if ($("cadUnit").textContent !== unit) $("cadUnit").textContent = unit;
+
+  let caption = "Waiting for predictions…";
+  if (fresh) {
+    caption = ACTIVITIES[pred.model2]?.text ?? pred.model2;
+    if (pred.model2 === "biking") caption += bikeVariant === "air" ? " · on your back" : " · on a bike";
+  }
+  if ($("caption").textContent !== caption) $("caption").textContent = caption;
+
+  const [state, text] = connectionState(now);
+  const conn = $("conn");
+  if (conn.dataset.state !== state) conn.dataset.state = state;
+  if ($("connText").textContent !== text) $("connText").textContent = text;
+}
+
+// ---------------- avatar geometry (figure units, y up, facing +x) ----------------
+const L = { torso: 0.52, neck: 0.07, head: 0.12, upper: 0.30, fore: 0.28, thigh: 0.46, shin: 0.46 };
+const DEG = Math.PI / 180;
+const P = (x, y) => ({ x, y });
+// segment hanging from `from` at angle a (deg): 0 = straight down, + = forward
+const down = (from, a, len) => P(from.x + len * Math.sin(a * DEG), from.y - len * Math.cos(a * DEG));
+// segment rising from `from` at angle a (deg): 0 = straight up, + = forward
+const up = (from, a, len) => P(from.x + len * Math.sin(a * DEG), from.y + len * Math.cos(a * DEG));
+
+// Two-link inverse kinematics: middle joint between a and b.
+// bend +1 rotates counter-clockwise from a->b (knee forward when the leg points down).
+function ik(a, b, l1, l2, bend) {
+  const dx = b.x - a.x, dy = b.y - a.y;
+  const d = Math.min(Math.max(Math.hypot(dx, dy), Math.abs(l1 - l2) + 1e-3), l1 + l2 - 1e-3);
+  const alpha = Math.acos((l1 * l1 + d * d - l2 * l2) / (2 * l1 * d));
+  const ang = Math.atan2(dy, dx) + bend * alpha;
+  return P(a.x + l1 * Math.cos(ang), a.y + l1 * Math.sin(ang));
+}
+
+// Limbs are always [far leg, near leg, far arm, near arm] so poses can blend.
+function upright(hip, lean, legs, arms) {
+  const shoulder = up(hip, lean, L.torso * 0.92);
+  const neck = up(hip, lean, L.torso);
+  const head = up(neck, lean, L.neck + L.head);
+  const limbs = [];
+  for (const [thigh, knee] of legs) {
+    const j = down(hip, thigh, L.thigh);
+    limbs.push({ a: hip, j, b: down(j, thigh - knee, L.shin) });
+  }
+  for (const [upper, elbow] of arms) {
+    const j = down(shoulder, upper, L.upper);
+    limbs.push({ a: shoulder, j, b: down(j, upper + elbow, L.fore) });
+  }
+  return { hip, shoulder, neck, head, limbs };
+}
+
+function shift(pose, dy) {
+  const s = (p) => P(p.x, p.y + dy);
+  return {
+    hip: s(pose.hip), shoulder: s(pose.shoulder), neck: s(pose.neck), head: s(pose.head),
+    limbs: pose.limbs.map((l) => ({ a: s(l.a), j: s(l.j), b: s(l.b) })),
+  };
+}
+// Put the lowest foot on the ground (y = 0)
+const grounded = (pose, extra = 0) => shift(pose, -Math.min(pose.limbs[0].b.y, pose.limbs[1].b.y) + extra);
+
+const BIKE = {
+  rear: P(-0.62, 0.34), front: P(0.66, 0.34), wheel: 0.34,
+  crank: P(0, 0.36), crankR: 0.17, seat: P(-0.2, 1.0), bar: P(0.48, 1.08),
+};
+const AIR_CRANK = P(0.25, 0.66);
+
+const POSES = {
+  standing(ph) {
+    const s = Math.sin(2 * Math.PI * ph);
+    return grounded(upright(P(0.015 * s, 0), 1.5 * s, [[-3, 2], [3, 2]], [[-6 + 2 * s, 8], [6 - 2 * s, 10]]));
+  },
+  walking(ph) {
+    const p = 2 * Math.PI * ph;
+    const leg = (q) => [22 * Math.sin(q), 6 + 40 * Math.max(0, Math.cos(q))];
+    const arm = (q) => [20 * Math.sin(q), 18 + 12 * Math.max(0, Math.sin(q))];
+    // far leg is half a stride behind; each arm swings with the opposite leg
+    return grounded(upright(P(0, 0), 3, [leg(p + Math.PI), leg(p)], [arm(p), arm(p + Math.PI)]));
+  },
+  running(ph) {
+    const p = 2 * Math.PI * ph;
+    const leg = (q) => [10 + 40 * Math.sin(q), 25 + 85 * Math.max(0, Math.cos(q))];
+    const arm = (q) => [35 * Math.sin(q), 85];
+    const bounce = 0.05 * Math.abs(Math.sin(2 * p));
+    return grounded(upright(P(0, 0), 14, [leg(p + Math.PI), leg(p)], [arm(p), arm(p + Math.PI)]), bounce);
+  },
+  bike(ph) {
+    const th = -2 * Math.PI * ph;   // cranks turn clockwise seen from this side
+    const c = BIKE.crank, r = BIKE.crankR;
+    const pedalNear = P(c.x + r * Math.cos(th), c.y + r * Math.sin(th));
+    const pedalFar = P(c.x - r * Math.cos(th), c.y - r * Math.sin(th));
+    const hip = P(BIKE.seat.x, BIKE.seat.y + 0.03);
+    const lean = 38;
+    const shoulder = up(hip, lean, L.torso * 0.92);
+    const neck = up(hip, lean, L.torso);
+    const head = up(neck, lean, L.neck + L.head);
+    const elbow = ik(shoulder, BIKE.bar, L.upper, L.fore, -1);
+    return {
+      hip, shoulder, neck, head,
+      limbs: [
+        { a: hip, j: ik(hip, pedalFar, L.thigh, L.shin, 1), b: pedalFar },
+        { a: hip, j: ik(hip, pedalNear, L.thigh, L.shin, 1), b: pedalNear },
+        { a: shoulder, j: elbow, b: BIKE.bar },
+        { a: shoulder, j: elbow, b: BIKE.bar },
+      ],
+    };
+  },
+  airbike(ph) {
+    const th = -2 * Math.PI * ph;
+    const c = AIR_CRANK, r = BIKE.crankR;
+    const pedalNear = P(c.x + r * Math.cos(th), c.y + r * Math.sin(th));
+    const pedalFar = P(c.x - r * Math.cos(th), c.y - r * Math.sin(th));
+    const hip = P(0, 0.1);
+    const lean = -84;   // torso lying back toward -x
+    const shoulder = up(hip, lean, L.torso * 0.92);
+    const neck = up(hip, lean, L.torso);
+    const head = up(neck, lean, L.neck + L.head);
+    const armOnFloor = () => {
+      const j = down(shoulder, 72, L.upper);
+      return { a: shoulder, j, b: down(j, 88, L.fore) };
+    };
+    return {
+      hip, shoulder, neck, head,
+      limbs: [
+        { a: hip, j: ik(hip, pedalFar, L.thigh, L.shin, 1), b: pedalFar },
+        { a: hip, j: ik(hip, pedalNear, L.thigh, L.shin, 1), b: pedalNear },
+        armOnFloor(), armOnFloor(),
+      ],
+    };
+  },
+};
+
+function lerpPose(a, b, k) {
+  const l = (p, q) => P(p.x + (q.x - p.x) * k, p.y + (q.y - p.y) * k);
+  return {
+    hip: l(a.hip, b.hip), shoulder: l(a.shoulder, b.shoulder), neck: l(a.neck, b.neck), head: l(a.head, b.head),
+    limbs: a.limbs.map((la, i) => ({ a: l(la.a, b.limbs[i].a), j: l(la.j, b.limbs[i].j), b: l(la.b, b.limbs[i].b) })),
+  };
+}
+
+function poseName(now) {
+  if (!predFresh(now)) return "standing";
+  const m = pred.model2;
+  if (m === "biking") return bikeVariant === "air" ? "airbike" : "bike";
+  return POSES[m] ? m : "standing";
+}
+
+// ---------------- drawing ----------------
+
+function fitCanvas(canvas) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.max(1, Math.round(canvas.clientWidth * dpr));
+  const h = Math.max(1, Math.round(canvas.clientHeight * dpr));
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  return dpr;
+}
+
+function drawAvatar(pose, bikeAlpha) {
+  const cv = $("avatar"), ctx = cv.getContext("2d");
+  fitCanvas(cv);
+  const W = cv.width, H = cv.height;
+  ctx.clearRect(0, 0, W, H);
+  const box = { x0: -1.15, x1: 1.15, y0: -0.08, y1: 2.0 };
+  const s = Math.min(W / (box.x1 - box.x0), H / (box.y1 - box.y0));
+  const ox = W / 2 - s * (box.x0 + box.x1) / 2;
+  const oy = H / 2 + s * (box.y0 + box.y1) / 2;
+  const X = (p) => ox + s * p.x, Y = (p) => oy - s * p.y;
+  const line = (pts) => { ctx.beginPath(); ctx.moveTo(X(pts[0]), Y(pts[0])); for (const p of pts.slice(1)) ctx.lineTo(X(p), Y(p)); ctx.stroke(); };
+
+  const fig = css("--figure"), border = css("--border"), muted = css("--muted");
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
+
+  // ground
+  ctx.strokeStyle = border; ctx.lineWidth = Math.max(2, 0.02 * s);
+  line([P(box.x0, 0), P(box.x1, 0)]);
+
+  // bike (fades in and out)
+  if (bikeAlpha > 0.01) {
+    ctx.save();
+    ctx.globalAlpha = bikeAlpha;
+    ctx.strokeStyle = muted; ctx.lineWidth = 0.025 * s;
+    for (const c of [BIKE.rear, BIKE.front]) { ctx.beginPath(); ctx.arc(X(c), Y(c), BIKE.wheel * s, 0, 2 * Math.PI); ctx.stroke(); }
+    const head = P(0.5, 0.9);
+    line([BIKE.rear, BIKE.crank, BIKE.seat, BIKE.rear]);
+    line([BIKE.seat, head, BIKE.crank]);
+    line([head, BIKE.front]);
+    line([head, BIKE.bar]);
+    line([P(BIKE.seat.x - 0.1, BIKE.seat.y), P(BIKE.seat.x + 0.08, BIKE.seat.y)]);
+    ctx.beginPath(); ctx.arc(X(BIKE.crank), Y(BIKE.crank), BIKE.crankR * s, 0, 2 * Math.PI);
+    ctx.globalAlpha = bikeAlpha * 0.35; ctx.stroke();
+    ctx.restore();
+  }
+
+  const limbW = 0.06 * s;
+  ctx.strokeStyle = fig;
+  // far limbs, faded for depth
+  ctx.globalAlpha = 0.45; ctx.lineWidth = limbW;
+  for (const i of [0, 2]) line([pose.limbs[i].a, pose.limbs[i].j, pose.limbs[i].b]);
+  // torso + near limbs
+  ctx.globalAlpha = 1;
+  ctx.lineWidth = limbW * 1.25;
+  line([pose.hip, pose.neck]);
+  ctx.lineWidth = limbW;
+  for (const i of [1, 3]) line([pose.limbs[i].a, pose.limbs[i].j, pose.limbs[i].b]);
+
+  // ===== HEAD (placeholder: plain circle, or HEAD_PHOTO clipped to the circle) =====
+  const hx = X(pose.head), hy = Y(pose.head), hr = L.head * s;
+  const headImg = player.photo;
+  if (headImg && headImg.complete && headImg.naturalWidth) {
+    ctx.save();
+    ctx.beginPath(); ctx.arc(hx, hy, hr, 0, 2 * Math.PI); ctx.clip();
+    const side = Math.min(headImg.naturalWidth, headImg.naturalHeight);
+    ctx.drawImage(headImg, (headImg.naturalWidth - side) / 2, (headImg.naturalHeight - side) / 2, side, side,
+                  hx - hr, hy - hr, 2 * hr, 2 * hr);
+    ctx.restore();
+    ctx.lineWidth = 0.02 * s; ctx.beginPath(); ctx.arc(hx, hy, hr, 0, 2 * Math.PI); ctx.stroke();
+  } else {
+    ctx.fillStyle = fig;
+    ctx.beginPath(); ctx.arc(hx, hy, hr, 0, 2 * Math.PI); ctx.fill();
+  }
+}
+
+function drawPlot() {
+  const cv = $("plot"), ctx = cv.getContext("2d");
+  const dpr = fitCanvas(cv);
+  const W = cv.width, H = cv.height;
+  ctx.clearRect(0, 0, W, H);
+  const fontPx = Math.round(13 * dpr);
+  ctx.font = `${fontPx}px system-ui, sans-serif`;
+  const padL = 34 * dpr, padR = 8 * dpr, padT = 6 * dpr, padB = 22 * dpr;
+  const pw = W - padL - padR, ph = H - padT - padB;
+  if (pw <= 0 || ph <= 0) return;
+
+  let maxMag = 0;
+  for (const r of raw) maxMag = Math.max(maxMag, r.mag);
+  const yMax = maxMag <= 3 ? 3 : maxMag <= 4 ? 4 : maxMag <= 8 ? 8 : 16;
+  const yStep = yMax <= 4 ? 1 : yMax <= 8 ? 2 : 4;
+  const span = CONFIG.plotSeconds * 1000;
+  const newest = raw.length ? raw[raw.length - 1].t : 0;
+  const X = (t) => padL + pw * (1 - (newest - t) / span);
+  const Y = (g) => padT + ph * (1 - g / yMax);
+
+  // recessive grid + labels
+  ctx.strokeStyle = css("--border"); ctx.lineWidth = dpr;
+  ctx.fillStyle = css("--text-2");
+  ctx.textAlign = "right"; ctx.textBaseline = "middle";
+  for (let g = 0; g <= yMax; g += yStep) {
+    ctx.beginPath(); ctx.moveTo(padL, Y(g)); ctx.lineTo(padL + pw, Y(g)); ctx.stroke();
+    ctx.fillText(String(g), padL - 6 * dpr, Y(g));
+  }
+  ctx.textAlign = "center"; ctx.textBaseline = "top";
+  for (const [sec, txt] of [[-10, "−10 s"], [-5, "−5 s"], [0, "now"]]) {
+    const x = padL + pw * (1 + sec / CONFIG.plotSeconds);
+    ctx.textAlign = sec === -10 ? "left" : sec === 0 ? "right" : "center";
+    ctx.fillText(txt, x, padT + ph + 6 * dpr);
+  }
+
+  if (raw.length < 2) return;
+  ctx.save();
+  ctx.beginPath(); ctx.rect(padL, padT, pw, ph); ctx.clip();
+  ctx.strokeStyle = css("--series-1"); ctx.lineWidth = 2 * dpr;
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  raw.forEach((r, i) => (i ? ctx.lineTo(X(r.t), Y(r.mag)) : ctx.moveTo(X(r.t), Y(r.mag))));
+  ctx.stroke();
+  ctx.restore();
+}
+
+// ---------------- animation loop ----------------
+let last = performance.now();
+let phase = 0, cadSmooth = 0;
+let shownPose = "standing", fromPose = null, blendStart = 0;
+let bikeAlpha = 0;
+let lastPanel = 0;
+
+function frame(now) {
+  const dt = Math.min(0.1, (now - last) / 1000);
+  last = now;
+
+  const name = poseName(now);
+  const fresh = predFresh(now);
+  const target = name === "standing" ? 0
+    : (fresh && pred.cadence_hz > 0 ? pred.cadence_hz : DEFAULT_CADENCE[pred?.model2] ?? 1);
+  // starting to move: begin at the measured cadence instead of ramping up from 0
+  if (shownPose === "standing" && name !== "standing") cadSmooth = target;
+  cadSmooth += (target - cadSmooth) * (1 - Math.exp(-dt / CONFIG.cadenceTauS));
+  phase += (name === "standing" ? 0.25 : Math.max(cadSmooth, 0.3)) * dt;
+
+  let pose = POSES[name](phase);
+  if (name !== shownPose) {
+    fromPose = lastDrawn ?? pose;
+    shownPose = name; blendStart = now;
+  }
+  const k = Math.min(1, (now - blendStart) / CONFIG.blendMs);
+  if (fromPose && k < 1) pose = lerpPose(fromPose, pose, k * k * (3 - 2 * k));
+  lastDrawn = pose;
+
+  bikeAlpha += ((name === "bike" ? 1 : 0) - bikeAlpha) * (1 - Math.exp(-dt / 0.25));
+  if (use3d()) avatar3d.update(name, Math.max(cadSmooth, 0.3), bikeAlpha, dt, player.photo);
+  else drawAvatar(pose, bikeAlpha);
+  drawPlot();
+  if (now - lastPanel > 100) { updatePanels(now); lastPanel = now; }
+  requestAnimationFrame(frame);
+}
+let lastDrawn = null;
+</script>
+
+<script type="module">
+// ===================== 3D AVATAR (three.js + animation/avatar.glb) =====================
+// avatar.glb: the Meshy character with all its animations in one file (texture
+// shrunk to 1024 px with animation/shrink_glb.py). Clips are picked by name:
+const MODEL = "../animation/avatar.glb";
+const CLIPS = {
+  standing: { name: "Listening_Gesture" },               // idle standing, 9.3 s
+  walking:  { name: "Walking", cycles: 1 },              // one stride per loop
+  running:  { name: "Running", cycles: 1 },              // one stride per loop
+  // Upright biking: the riding part at the start of the unicycle clip. From 0 to
+  // 0.62 s the feet do half a pedal turn (left foot top -> bottom); played
+  // forward then backward (ping-pong) that is one full turn. After ~1 s the clip
+  // jumps off the unicycle, which is never played. A bicycle is drawn under it
+  // and the arms (held out for balance in the clip) are bent onto the handlebars.
+  bike:     { name: "Unicycle_Jump_Dismount", start: 0, end: 0.62, pingPong: true, cycles: 1 },
+  airbike:  { name: "bicycle_crunch", cycles: 1 },       // on the back, one pedal turn per loop
+};
+// Playback rate = cadence (Hz) x the time one cycle takes at normal speed.
+// cycles = strides (or pedal turns) in one loop of the clip, measured 2026-10-26.
+const VIEW_AZIMUTH = -65 * Math.PI / 180;   // camera angle round the body; mostly side-on, facing right
+const BIKE = {                              // bicycle drawn under the bike clip (m), fitted to the rider
+  wheelR: 0.33,         // wheel radius
+  bbHeight: 0.28,       // bottom bracket (crank axle) above the floor
+  rear: 0.42,           // rear axle behind the bottom bracket
+  front: 0.62,          // front axle ahead of the bottom bracket
+  crank: 0.17,          // crank arm length
+  bar: [0.42, 0.12],    // handlebar centre: ahead of / above the hips
+  gripHalf: 0.21,       // half the handlebar width
+};
+const PHOTO_SIZE = 0.26;                    // face sprite diameter (m)
+
+async function initAvatar3d() {
+  if (location.protocol === "file:") throw new Error("serve the page with python dashboard/serve.py");
+  let THREE, GLTFLoader, OrbitControls;
+  try {
+    THREE = await import("three");
+    ({ GLTFLoader } = await import("three/addons/loaders/GLTFLoader.js"));
+    ({ OrbitControls } = await import("three/addons/controls/OrbitControls.js"));
+  } catch {
+    throw new Error("couldn't load three.js (no internet?)");
+  }
+  const gltf = await new GLTFLoader().loadAsync(MODEL).catch(() => {
+    throw new Error(`missing animation/avatar.glb`);
+  });
+  const character = gltf.scene;
+  const root = new THREE.Group();            // moved up/down per clip to keep the body on the floor
+  root.add(character);
+
+  const bones = {};
+  character.traverse((o) => { if (o.isBone) bones[o.name.replace(/^mixamorig:?/, "")] = o; });
+  if (!bones.Hips || !bones.Head) throw new Error("avatar.glb has no Mixamo-style skeleton");
+  let skinned = null;
+  character.traverse((o) => { if (!skinned && o.isSkinnedMesh) skinned = o; });
+
+  // ---- clips: in place, cut to the part we want ----
+  const clips = {};
+  for (const [pose, spec] of Object.entries(CLIPS)) {
+    let clip = gltf.animations.find((a) => a.name === spec.name);
+    if (!clip) throw new Error(`no "${spec.name}" clip in avatar.glb`);
+    clip = clip.clone();
+    if (spec.end !== undefined) {
+      for (const track of clip.tracks) track.trim(spec.start, spec.end).shift(-spec.start);
+      clip.duration = spec.end - spec.start;
+    }
+    // walking/running/the unicycle move the hips forward, which would carry the
+    // avatar out of view: pin the hips' horizontal position
+    for (const track of clip.tracks) {
+      if (!/Hips\.position$/.test(track.name)) continue;
+      const v = track.values;
+      for (let i = 0; i < v.length; i += 3) { v[i] = v[0]; v[i + 2] = v[2]; }
+    }
+    clips[pose] = clip;
+  }
+
+  // ---- scene ----
+  const canvas = document.getElementById("avatar3d");
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+  renderer.setPixelRatio(window.devicePixelRatio || 1);
+  const scene = new THREE.Scene();
+  scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8984, 2.0));
+  const sun = new THREE.DirectionalLight(0xffffff, 2.0);
+  sun.position.set(-1.5, 3, 2);
+  scene.add(sun);
+  const groundMat = new THREE.MeshBasicMaterial();
+  const ground = new THREE.Mesh(new THREE.CircleGeometry(0.85, 64), groundMat);
+  ground.rotation.x = -Math.PI / 2;
+  scene.add(ground);
+  scene.add(root);
+  const camera = new THREE.PerspectiveCamera(30, 1, 0.1, 50);
+
+  // page colours (light/dark theme)
+  const propMat = new THREE.MeshStandardMaterial({ roughness: 0.6, transparent: true });
+  function applyTheme() {
+    groundMat.color.set(css("--border"));
+    propMat.color.set(css("--muted"));
+  }
+  applyTheme();
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", applyTheme);
+
+  // ---- per-clip floor offset, and the bicycle fitted to the bike clip ----
+  // Sample each clip: where the body's lowest point is, and for the bike clip
+  // where the feet, hips and shoulders go (to place the bicycle under the rider).
+  const lift = {}, shiftZ = {};          // per clip: raise to the floor, slide to centre
+  const bicycle = new THREE.Group();     // in the character's coordinates, raised like it
+  const bike = {};                       // fitted points: bb, grips, crank meshes
+  const tube = (r) => new THREE.Mesh(new THREE.CylinderGeometry(r, r, 1, 12), propMat);
+  // stretch a unit cylinder between a and b
+  const place = (m, a, b) => {
+    m.position.copy(a).add(b).multiplyScalar(0.5);
+    m.scale.set(1, Math.max(a.distanceTo(b), 1e-4), 1);
+    m.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), b.clone().sub(a).normalize());
+    return m;
+  };
+  {
+    const probe = new THREE.AnimationMixer(character);
+    const w = new THREE.Vector3();
+    for (const [pose, clip] of Object.entries(clips)) {
+      probe.stopAllAction();
+      probe.clipAction(clip).play();
+      let low = Infinity;
+      const feet = [], hips = [], shoulders = { Left: [], Right: [] };
+      for (let i = 0; i < 16; i++) {
+        probe.setTime(clip.duration * i / 16);
+        character.updateMatrixWorld(true);
+        skinned.computeBoundingBox();
+        low = Math.min(low, skinned.boundingBox.clone().applyMatrix4(skinned.matrixWorld).min.y);
+        if (pose === "bike") {
+          for (const b of [bones.LeftFoot, bones.RightFoot]) feet.push(b.getWorldPosition(w).clone());
+          hips.push(bones.Hips.getWorldPosition(w).clone());
+          for (const side of ["Left", "Right"]) shoulders[side].push(bones[side + "Arm"].getWorldPosition(w).clone());
+        }
+      }
+      // only fix clips that are clearly off the floor (the crunch is 1.4 m under it);
+      // a few cm of heel below the floor in walking/running is normal skinning
+      lift[pose] = Math.abs(low) > 0.1 ? -low : 0;
+      shiftZ[pose] = 0;
+      if (pose === "bike") {
+        const mean = (ps) => ps.reduce((a, p) => a.add(p), new THREE.Vector3()).divideScalar(ps.length);
+        const bb = mean(feet).setX(0);                         // crank axle: middle of the feet's path
+        const hip = mean(hips).setX(0);
+        lift.bike = BIKE.bbHeight - bb.y;
+        const axleY = BIKE.wheelR - lift.bike;                 // wheels stand on the floor
+        const rear = new THREE.Vector3(0, axleY, bb.z - BIKE.rear);
+        const front = new THREE.Vector3(0, axleY, bb.z + BIKE.front);
+        const seat = hip.clone().add(new THREE.Vector3(0, -0.1, 0));
+        const bar = hip.clone().add(new THREE.Vector3(0, BIKE.bar[1], BIKE.bar[0]));
+        const head = new THREE.Vector3(0, bar.y - 0.1, front.z - 0.08);   // top of the head tube
+        for (const c of [rear, front]) {
+          const wheel = new THREE.Mesh(new THREE.TorusGeometry(BIKE.wheelR, 0.022, 10, 48), propMat);
+          wheel.position.copy(c);
+          wheel.rotation.y = Math.PI / 2;
+          bicycle.add(wheel);
+        }
+        const ring = new THREE.Mesh(new THREE.TorusGeometry(0.09, 0.012, 8, 32), propMat);
+        ring.position.copy(bb);
+        ring.rotation.y = Math.PI / 2;
+        bicycle.add(ring);
+        for (const [a, b] of [[rear, bb], [rear, seat], [seat, bb], [seat, head], [head, bb], [head, front], [head, bar]]) {
+          bicycle.add(place(tube(0.02), a, b));
+        }
+        const saddle = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.04, 0.26), propMat);
+        saddle.position.copy(seat);
+        bicycle.add(saddle);
+        // handlebar across the bike; grips on the side each shoulder is on
+        bike.grips = {};
+        for (const side of ["Left", "Right"]) {
+          const sx = Math.sign(mean(shoulders[side]).x - hip.x) || (side === "Left" ? 1 : -1);
+          bike.grips[side] = bar.clone().setX(sx * BIKE.gripHalf);
+        }
+        bicycle.add(place(tube(0.016), bike.grips.Left, bike.grips.Right));
+        bike.bb = bb;
+        bike.cranks = [tube(0.014), tube(0.014)];
+        bicycle.add(...bike.cranks);
+        shiftZ.bike = -(rear.z + front.z) / 2;               // centre the bike on the floor disc
+        bicycle.position.set(0, lift.bike, shiftZ.bike);
+      }
+    }
+    probe.stopAllAction();
+    probe.uncacheRoot(character);
+  }
+  bicycle.visible = false;
+  scene.add(bicycle);
+
+  // Bend each arm onto its grip: a two-bone solve for the elbow, then turn the
+  // upper arm and forearm to point at it. Weighted by how much of the bike clip
+  // is showing, so it blends in and out with the cross-fade.
+  const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _c = new THREE.Vector3(), _d = new THREE.Vector3();
+  const _q = new THREE.Quaternion(), _qp = new THREE.Quaternion(), _qb = new THREE.Quaternion();
+  function aim(bone, child, target, weight) {
+    const from = bone.getWorldPosition(_a);
+    const cur = child.getWorldPosition(_b).sub(from).normalize();
+    const want = _c.copy(target).sub(from).normalize();
+    _q.setFromUnitVectors(cur, want).multiply(bone.getWorldQuaternion(_qb));     // new world rotation
+    _q.premultiply(bone.parent.getWorldQuaternion(_qp).invert());               // -> parent space
+    bone.quaternion.slerp(_q, weight);
+    bone.updateMatrixWorld(true);
+  }
+  function armsOnBars(weight) {
+    character.updateMatrixWorld(true);
+    for (const side of ["Left", "Right"]) {
+      const arm = bones[side + "Arm"], fore = bones[side + "ForeArm"], hand = bones[side + "Hand"];
+      const grip = bicycle.localToWorld(bike.grips[side].clone());
+      const s = arm.getWorldPosition(new THREE.Vector3());
+      const l1 = s.distanceTo(fore.getWorldPosition(_d));
+      const l2 = _d.distanceTo(hand.getWorldPosition(_a));
+      const toGrip = grip.clone().sub(s);
+      const d = Math.min(toGrip.length(), l1 + l2 - 1e-3);
+      const dir = toGrip.normalize();
+      // elbows bend down, back and a little outward
+      const pole = new THREE.Vector3(Math.sign(s.x - root.position.x) * 0.4, -1, -0.4);
+      pole.addScaledVector(dir, -pole.dot(dir)).normalize();
+      const along = (l1 * l1 + d * d - l2 * l2) / (2 * d);
+      const elbow = s.clone().addScaledVector(dir, along).addScaledVector(pole, Math.sqrt(Math.max(0, l1 * l1 - along * along)));
+      aim(arm, fore, elbow, weight);
+      aim(fore, hand, grip, weight);
+    }
+  }
+
+  // cranks follow the feet round the crank axle
+  function updateCranks() {
+    const bb = bicycle.localToWorld(bike.bb.clone());
+    [bones.LeftFoot, bones.RightFoot].forEach((foot, i) => {
+      const f = foot.getWorldPosition(_a);
+      const dir = _b.set(0, f.y - bb.y, f.z - bb.z).normalize();
+      const end = bike.bb.clone().addScaledVector(dir, BIKE.crank);
+      place(bike.cranks[i], bike.bb, end);
+    });
+  }
+
+  // ---- face photo hook: a round sprite that follows the head bone ----
+  const photoMat = new THREE.SpriteMaterial({ depthTest: false });
+  const photoSprite = new THREE.Sprite(photoMat);
+  photoSprite.scale.set(PHOTO_SIZE, PHOTO_SIZE, 1);
+  photoSprite.renderOrder = 1;
+  photoSprite.visible = false;
+  scene.add(photoSprite);
+  let photoShown = null;
+  function setPhoto(img) {
+    if (img === photoShown) return;
+    if (img && !(img.complete && img.naturalWidth)) return;   // not loaded yet: retry next frame
+    photoShown = img;
+    photoMat.map?.dispose();
+    photoMat.map = null;
+    if (img) {
+      const c = document.createElement("canvas");
+      c.width = c.height = 256;
+      const g = c.getContext("2d");
+      const side = Math.min(img.naturalWidth, img.naturalHeight);
+      g.beginPath(); g.arc(128, 128, 124, 0, 2 * Math.PI); g.clip();
+      g.drawImage(img, (img.naturalWidth - side) / 2, (img.naturalHeight - side) / 2, side, side, 0, 0, 256, 256);
+      g.lineWidth = 8; g.strokeStyle = css("--figure"); g.stroke();
+      photoMat.map = new THREE.CanvasTexture(c);
+      photoMat.map.colorSpace = THREE.SRGBColorSpace;
+    }
+    photoMat.needsUpdate = true;
+    photoSprite.visible = !!img;
+  }
+
+  // ---- animation ----
+  const mixer = new THREE.AnimationMixer(character);
+  const actions = {}, cycleS = {};
+  for (const [pose, clip] of Object.entries(clips)) {
+    const spec = CLIPS[pose];
+    actions[pose] = mixer.clipAction(clip);
+    if (spec.pingPong) actions[pose].setLoop(THREE.LoopPingPong, Infinity);
+    cycleS[pose] = clip.duration * (spec.pingPong ? 2 : 1) / (spec.cycles || 1);
+  }
+  let current = "standing";
+  actions.standing.play();
+
+  // Drag to rotate, scroll/pinch to zoom, right-drag/two-finger drag to move
+  // (like Meshy's viewer). "Reset view" (or a double-click) goes back to the
+  // default framing, which also follows window resizes until the view is moved.
+  const controls = new OrbitControls(camera, canvas);
+  controls.enableDamping = true;
+  controls.minDistance = 1.2;
+  controls.maxDistance = 14;
+  controls.maxPolarAngle = Math.PI * 0.58;       // don't go far under the floor
+  let userMoved = false;
+  controls.addEventListener("start", () => { userMoved = true; });
+  canvas.addEventListener("dblclick", () => resetView());
+
+  function resetView() {
+    userMoved = false;
+    // keep a 2.5 m wide x 2 m tall box around the body in view
+    const t = Math.tan(camera.fov * Math.PI / 360);
+    const dist = Math.max(1.05 / t, 1.35 / (t * camera.aspect)) + 0.6;
+    const look = new THREE.Vector3(0, 0.8, 0);
+    camera.position.set(dist * Math.sin(VIEW_AZIMUTH), 0.45, dist * Math.cos(VIEW_AZIMUTH)).add(look);
+    controls.target.copy(look);
+    controls.update();
+  }
+
+  let viewW = 0, viewH = 0;
+  function fitView() {
+    const w = canvas.clientWidth, h = canvas.clientHeight;
+    if (!w || !h || (w === viewW && h === viewH)) return;
+    viewW = w; viewH = h;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    if (!userMoved) resetView();
+  }
+
+  const toCamera = new THREE.Vector3();
+  return {
+    // pose: standing | walking | running | bike | airbike (the stick figure's names)
+    update(pose, cadenceHz, bikeAlpha, dt, photo) {
+      if (!actions[pose]) pose = "standing";
+      if (pose !== current) {
+        const fade = CONFIG.blendMs / 1000;
+        actions[pose].reset().setEffectiveWeight(1).fadeIn(fade).play();
+        actions[current].fadeOut(fade);
+        current = pose;
+      }
+      actions[current].timeScale = pose === "standing" ? 1 : cadenceHz * cycleS[pose];
+      mixer.update(dt);
+
+      // floor offset and centring follow the cross-fade: weighted by each clip's current weight
+      let y = 0, z = 0, wsum = 0;
+      for (const [p, a] of Object.entries(actions)) {
+        const wt = a.isRunning() ? a.getEffectiveWeight() : 0;
+        y += wt * lift[p]; z += wt * shiftZ[p]; wsum += wt;
+      }
+      root.position.set(0, wsum ? y / wsum : 0, wsum ? z / wsum : 0);
+
+      const onBike = actions.bike.isRunning() ? actions.bike.getEffectiveWeight() : 0;
+      if (onBike > 0.01) armsOnBars(onBike);
+      bicycle.visible = bikeAlpha > 0.01;
+      propMat.opacity = bikeAlpha;
+      if (bicycle.visible) updateCranks();
+
+      setPhoto(photo);
+      if (photoSprite.visible) {
+        root.updateMatrixWorld(true);
+        bones.Head.getWorldPosition(photoSprite.position);
+        toCamera.subVectors(camera.position, photoSprite.position).normalize();
+        photoSprite.position.y += 0.09;              // head bone sits at the base of the skull
+        photoSprite.position.addScaledVector(toCamera, 0.14);
+      }
+
+      fitView();
+      controls.update();
+      renderer.render(scene, camera);
+    },
+    resetView,
+  };
+}
+
+initAvatar3d().then(
+  (api) => window.avatar3dReady(api),
+  (err) => {
+    console.warn("3D avatar unavailable, using the stick figure:", err);
+    window.avatar3dFailed(err.message || String(err));
+  },
+);
+</script>
+</body>
+</html>

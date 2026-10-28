@@ -218,3 +218,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# ME193 step counter additions
+.venv/
+.DS_Store
+# Raw recordings stay local (large, and include the FSR label channels).
+data/raw/*
+!data/raw/.gitkeep
+# Simulator recordings are fake and never used for training.
+data/sim/
+# Large model files: checkpoints stay local; small exports (e.g. JSON) can be committed.
+*.pt
+*.pth
+*.ckpt
+*.onnx
+*.tflite
+# 3D avatar: avatar.glb (texture shrunk) is committed; the full-size original
+# kept by animation/shrink_glb.py and any Mixamo FBX downloads stay local.
+animation/*.original.glb
+animation/*.fbx
