@@ -53,7 +53,7 @@ pip install -r requirements.txt
 | `data/processed/` | windowed / feature data |
 | `training/` | simulator, windowing, evaluation splits |
 | `models/` | exported models |
-| `analysis/` | `plot_raw.py` (one trial); figures in `analysis/figures/` |
+| `analysis/` | `plot_raw.py` (one trial), `plot_us_gyro.py` (gyro vs ultrasonic check); figures in `docs/figures/` |
 | `dashboard/` | `trial.html` (record trials, live plots) and `dashboard.html`: `python dashboard/serve.py` |
 | `animation/` | 3D avatar (`avatar.glb`) and `shrink_glb.py` |
 | `docs/` | write-up |

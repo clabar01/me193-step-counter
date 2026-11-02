@@ -4,7 +4,7 @@ Reads <name>.csv and, if it is next to it, <name>.json for the title.
 
 Usage:
     python analysis/plot_raw.py data/raw/20261028_01.csv
-    python analysis/plot_raw.py data/raw/20261028_01.csv --out analysis/figures/20261028_01.png
+    python analysis/plot_raw.py data/raw/20261028_01.csv --out docs/figures/20261028_01.png
     python analysis/plot_raw.py data/raw/20261028_01.csv --seconds 10      # first 10 s only
 """
 
