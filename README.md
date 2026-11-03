@@ -55,7 +55,7 @@ pip install -r requirements.txt
 | `scripts/` | `make_sim_dataset.py` (fake dataset), `fit_sim_template.py` (simulator stride from real trials) |
 | `models/` | trained models: `step_detector/<sim or real>/` (weights `model.pt` stay local) |
 | `analysis/` | `plot_raw.py` (one trial), `plot_us_gyro.py` (gyro vs ultrasonic check); figures in `docs/figures/` |
-| `dashboard/` | `trial.html` (record trials, live plots) and `dashboard.html`: `python dashboard/serve.py` |
+| `dashboard/` | `dashboard.html` (live step counter, distance, cadence, step-detector plot, avatar) and `trial.html` (record trials): `python dashboard/serve.py` |
 | `animation/` | 3D avatar (`avatar.glb`) and `shrink_glb.py` |
 | `docs/` | write-up, [`step_detector.md`](docs/step_detector.md) (how the CNN works), figures |
 
@@ -67,6 +67,9 @@ MQTT: `broker.hivemq.com:1883`, topics under `ME193/ceci/steps/`:
 | `status` | board | every 5 s: rate, ultrasonic echo %, MQTT queue, recording state |
 | `trial/cmd` | Trial page | `start` / `stop` / `save` / `discard` (fields in `board/python/main.py`) |
 | `trial/state` | board | retained: idle / recording / stopped, sample count, the answer to the last command |
+| `live` | board | every 0.25 s: total steps, distance, cadence, last step length, step-detector output, new steps |
+| `step` | board | one message per counted step: time, total, distance, detection delay |
+| `live/cmd` | dashboard | `{"cmd": "reset"}` zeroes steps and distance |
 
 This is a public broker: anyone can read these topics or send a trial command.
 
@@ -150,6 +153,23 @@ step's length and is trained only on whole-trial distances. It is compared,
 leave-one-trial-out, with a fixed step length, Weinberg and a pendulum model.
 Results and the model go to `models/step_length/real/`; explanation and the
 honest limits of 8 trials: [docs/step_length.md](docs/step_length.md).
+
+### Live on the board
+
+```bash
+python scripts/export_models.py                     # trained models -> numpy .npz in models/ + board/python/models/
+BOARD=arduino@<board IP> board/deploy_board.sh      # then power-cycle the board
+python dashboard/serve.py                           # the live step counter
+python analysis/measure_latency.py --seconds 40     # delay from a heel strike/stomp to the count
+```
+
+The board runs both models with numpy (`board/python/live_steps.py`, no
+PyTorch). Every 0.25 s the step detector runs on the last 6 s. A sample's output
+only counts once the CNN has seen 1.2 s after it, and each sample is decided
+once, so overlapping windows never count a step twice; steps therefore appear
+about 1.3-1.5 s after they happen. Each step's length is computed when the next
+step arrives (it needs the step time). `training/step_detector/test_live_steps.py`
+checks the live pipeline finds the same steps as the offline one on the real trials.
 
 ## Results
 

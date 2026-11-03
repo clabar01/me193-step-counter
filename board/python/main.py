@@ -27,6 +27,17 @@ The recording state goes to STATE_TOPIC (retained, so a page opened later sees
 it) on every change and every second while recording, and to the LED matrix
 (Bridge.call "show_icon": ready / rec / count / saved / error).
 
+Live step counting (live_steps.py, the trained models as numpy): every
+LIVE_PERIOD_S the step detector runs on the last 6 s, and this publishes
+LIVE_TOPIC:
+    {"t": <newest sample t>, "wall": ..., "steps": <total>, "distance_m": ...,
+     "cadence_spm": ..., "step_length_m": <last step's length>,
+     "p": [step mass of each newly final sample], "p_t0": <t of p[0]>, "p_dt": 20,
+     "new_steps": [<t of each new step>], "proc_ms": <processing time>}
+and STEP_TOPIC once per step:
+    {"t": <step t>, "n": <total steps>, "distance_m": ..., "detect_ms": <newest t - step t>}
+{"cmd": "reset"} on LIVE_CMD_TOPIC zeroes the totals (the dashboard's Reset).
+
 Every STATUS_PERIOD_S this also publishes STATUS_TOPIC:
     {"wall": <board Unix time>, "t": <last sample t>, "rate_hz": ...,
      "queued": <batches waiting>, "dropped": ..., "mqtt": true/false,
@@ -49,6 +60,7 @@ import paho.mqtt.client as mqtt
 
 from arduino.app_utils import App, Bridge, Logger
 
+from live_steps import LiveSteps
 from recorder import Recorder
 
 logger = Logger("me193_steps")
@@ -59,6 +71,10 @@ RAW_TOPIC = f"{TOPIC_PREFIX}/raw"
 STATUS_TOPIC = f"{TOPIC_PREFIX}/status"
 CMD_TOPIC = f"{TOPIC_PREFIX}/trial/cmd"
 STATE_TOPIC = f"{TOPIC_PREFIX}/trial/state"
+LIVE_TOPIC = f"{TOPIC_PREFIX}/live"
+STEP_TOPIC = f"{TOPIC_PREFIX}/step"
+LIVE_CMD_TOPIC = f"{TOPIC_PREFIX}/live/cmd"
+MODELS_DIR = Path(__file__).resolve().parent / "models"
 # <app folder>/recordings, i.e. ~/ArduinoApps/me193_steps/recordings on the
 # board if App Lab maps the app folder into the container (check on first run:
 # the path is logged at startup and sent in the trial state).
@@ -73,6 +89,7 @@ FS = 50
 BATCH = 5                   # samples per message -> 10 messages/s
 QUEUE_SECONDS = 30          # buffer this much while MQTT is down
 STATUS_PERIOD_S = 5.0
+LIVE_PERIOD_S = 0.25
 
 batch = []
 queue = collections.deque(maxlen=QUEUE_SECONDS * FS // BATCH)
@@ -90,12 +107,21 @@ recorder = Recorder(RECORD_DIR, source=DATA_SOURCE)
 state_changed = threading.Event()
 led_flash = None            # ("saved" | "error", until monotonic time, trial state it belongs to)
 
+live_lock = threading.Lock()
+try:
+    live = LiveSteps(MODELS_DIR)
+except (OSError, KeyError, ValueError) as e:      # no models deployed: still stream and record
+    live = None
+    logger.error(f"live step counting off: can't load models from {MODELS_DIR}: {e}")
+live_ms = 0.0
+
 
 def on_connect(client, userdata, flags, reason_code, properties):
     global mqtt_up
     mqtt_up = not reason_code.is_failure
     logger.info(f"MQTT connected to {BROKER[0]} ({reason_code})")
     client.subscribe(CMD_TOPIC, qos=1)
+    client.subscribe(LIVE_CMD_TOPIC, qos=1)
     queue_ready.set()       # flush anything queued while we were down
     state_changed.set()     # re-publish the trial state
 
@@ -108,8 +134,18 @@ def on_disconnect(client, userdata, flags, reason_code, properties):
 
 
 def on_message(client, userdata, msg):
-    """Trial command from the dashboard (paho's thread)."""
+    """Trial or live command from the dashboard (paho's thread)."""
     global led_flash
+    if msg.topic == LIVE_CMD_TOPIC:
+        try:
+            cmd = json.loads(msg.payload)
+        except ValueError:
+            cmd = {}
+        if live and isinstance(cmd, dict) and cmd.get("cmd") == "reset":
+            with live_lock:
+                live.reset()
+            logger.info("live totals reset")
+        return
     try:
         cmd = json.loads(msg.payload)
         if not isinstance(cmd, dict):
@@ -146,6 +182,9 @@ def imu_sample(t, ax, ay, az, gx, gy, gz, us_mm, us_hit):
               "gx": round(gx, 2), "gy": round(gy, 2), "gz": round(gz, 2),
               "us_mm": int(us_mm), "us_hit": int(us_hit)}
     recorder.add(sample)
+    if live:
+        with live_lock:
+            live.add(sample)
     with lock:
         received += 1
         us_hits += sample["us_hit"]
@@ -219,6 +258,35 @@ def trial_loop():
                 logger.warning(f"show_icon failed: {e}")
 
 
+def live_loop():
+    """Run the step detector every LIVE_PERIOD_S and publish the results."""
+    global live_ms
+    next_run = time.monotonic()
+    while True:
+        next_run += LIVE_PERIOD_S
+        time.sleep(max(0.0, next_run - time.monotonic()))
+        start = time.perf_counter()
+        try:
+            with live_lock:
+                out = live.process()
+                totals = {"steps": live.steps, "distance_m": round(live.distance_m, 2),
+                          "cadence_spm": live.cadence_spm(),
+                          "step_length_m": round(live.last_length, 3) if live.last_length else None}
+        except Exception as e:      # never let a bad window stop the loop
+            logger.error(f"live step counting failed: {e}")
+            continue
+        live_ms = (time.perf_counter() - start) * 1000
+        if not mqtt_up or out["t"] is None:
+            continue
+        for st in out["steps"]:
+            client.publish(STEP_TOPIC, json.dumps({"t": st["t"], "n": st["n"], "distance_m": totals["distance_m"],
+                                                   "detect_ms": out["t"] - st["t"]}), qos=0)
+        client.publish(LIVE_TOPIC, json.dumps({
+            "t": out["t"], "wall": round(time.time(), 3), **totals,
+            "p": out["p"], "p_t0": out["p_t0"], "p_dt": 1000 // FS,
+            "new_steps": [st["t"] for st in out["steps"]], "proc_ms": round(live_ms, 1)}), qos=0)
+
+
 def status_loop():
     """App loop: log and publish a status line every STATUS_PERIOD_S."""
     global received, us_hits, dropped
@@ -232,8 +300,9 @@ def status_loop():
     status = {"wall": round(time.time(), 3), "t": last_t, "rate_hz": rate,
               "queued": n_queued, "dropped": n_dropped, "mqtt": mqtt_up,
               "mcu": last_mcu_status, "us_hit_pct": hit_pct, "rec": rec}
+    steps = f", steps {live.steps}, {live.distance_m:.1f} m, live {live_ms:.1f} ms" if live else ""
     logger.info(f"rate {rate:.1f} Hz, us hits {hit_pct}%, queued {n_queued}, dropped {n_dropped}, "
-                f"MQTT {'up' if mqtt_up else 'DOWN'}, trial {rec}")
+                f"MQTT {'up' if mqtt_up else 'DOWN'}, trial {rec}{steps}")
     if mqtt_up:
         client.publish(STATUS_TOPIC, json.dumps(status), qos=0)
 
@@ -243,5 +312,7 @@ Bridge.provide("imu_sample", imu_sample)
 Bridge.provide("imu_status", imu_status)
 threading.Thread(target=publisher, daemon=True).start()
 threading.Thread(target=trial_loop, daemon=True).start()
+if live:
+    threading.Thread(target=live_loop, daemon=True).start()
 
 App.run(user_loop=status_loop)
