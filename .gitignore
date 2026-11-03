@@ -233,6 +233,9 @@ data/sim/
 *.ckpt
 *.onnx
 *.tflite
+# ...except the final real-data models: tiny (<150 KB) and needed by the board and for grading.
+!models/step_detector/real/model.pt
+!models/step_length/real/model.pt
 # 3D avatar: avatar.glb (texture shrunk) is committed; the full-size original
 # kept by animation/shrink_glb.py and any Mixamo FBX downloads stay local.
 animation/*.original.glb
