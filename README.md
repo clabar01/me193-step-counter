@@ -49,14 +49,15 @@ pip install -r requirements.txt
 | --- | --- |
 | `board/` | App Lab app `me193_steps` (`sketch/`, `python/`), `deploy_board.sh`, `pull_recordings.py`, `run_board_app.py`, `tools/i2c_scanner/` |
 | `data/raw/` | trial recordings pulled from the board (gitignored) |
-| `data/sim/` | trials recorded from the simulator (gitignored, never used for training) |
+| `data/sim/` | FAKE trials from the simulator (gitignored): `raw/` + `truth/` from `scripts/make_sim_dataset.py`, for testing the pipeline only |
 | `data/processed/` | windowed / feature data |
-| `training/` | simulator, windowing, evaluation splits |
-| `models/` | exported models |
+| `training/` | `simulator.py` (+ `sim_template.json`), `step_detector/` (CNN step counter: data, model, losses, training, tests) |
+| `scripts/` | `make_sim_dataset.py` (fake dataset), `fit_sim_template.py` (simulator stride from real trials) |
+| `models/` | trained models: `step_detector/<sim or real>/` (weights `model.pt` stay local) |
 | `analysis/` | `plot_raw.py` (one trial), `plot_us_gyro.py` (gyro vs ultrasonic check); figures in `docs/figures/` |
 | `dashboard/` | `trial.html` (record trials, live plots) and `dashboard.html`: `python dashboard/serve.py` |
 | `animation/` | 3D avatar (`avatar.glb`) and `shrink_glb.py` |
-| `docs/` | write-up |
+| `docs/` | write-up, [`step_detector.md`](docs/step_detector.md) (how the CNN works), figures |
 
 MQTT: `broker.hivemq.com:1883`, topics under `ME193/ceci/steps/`:
 
@@ -97,14 +98,18 @@ remap.
 
 ### Simulator (no hardware)
 
-`training/simulator.py` makes **fake** thigh-IMU and ultrasonic data: the gyro
-swings once per stride, the accel spikes at each heel strike, and the ultrasonic
-distance dips each time the other thigh passes, with noise, missed echoes and
-stray echoes. Each time a trial starts it stands for 2 s, then walks exactly
-`--steps` steps at `--speed` and prints the true count. Three terminals:
+`training/simulator.py` makes **fake** knee-mount IMU and ultrasonic data in the
+current `BODY_R` frame. Walking plays back the average real stride from bench_04
+and A_01 (`training/sim_template.json`, from `scripts/fit_sim_template.py`), with
+stride-to-stride variation, a heel-strike accel spike per step, and close
+ultrasonic bursts (60-120 ms) each time the thighs pass, from both legs. Standing
+gives a steady 17-30 mm echo or none, and walls show up as far echoes that come
+and go. Each new trial gets a random strap offset. Each time a trial starts it
+stands for 2 s, then walks exactly `--steps` steps at `--speed` and prints the
+true count. Three terminals:
 
 ```bash
-python training/simulator.py --speed normal --steps 40     # also slow, fast, jog, run, stairs, mixed
+python training/simulator.py --speed normal --steps 40     # also slow, fast, jog, mixed
 python board/run_board_app.py                              # the real board app, on the laptop
 python dashboard/serve.py --trial --query "prefix=ME193/ceci/steps/test"
 ```
@@ -113,8 +118,24 @@ Then record a trial on the Trial page and enter the count the simulator printed.
 Everything uses the `ME193/ceci/steps/test` topics, and trials are saved to
 `data/sim/`, never `data/raw/`. Other options: `--continuous` (walk all the time),
 `--direct` (publish straight to `<prefix>/raw`, for the plots without the board
-app), `--subject p2` (a different fake person), `--seed N` (repeatable noise).
+app), `--seed N` (repeatable noise).
 `python board/run_board_app.py --icons` prints the LED icons.
+
+### Step detector (CNN)
+
+```bash
+python scripts/make_sim_dataset.py                          # FAKE sessions A/B/C -> data/sim/raw, truth in data/sim/truth
+python training/step_detector/train.py                      # train + evaluate on them
+python training/step_detector/train.py --data-dir data/raw  # the same on real trials, once recorded
+```
+
+A small 1D CNN (17k weights) outputs a step mass per sample. It is warm-started
+on step times from the gyro stride detector, then trained on each trial's
+counted steps only. Sessions A and B train/validate and session C is the test
+set. The gyro detector alone is the baseline. Results, the model and
+normalization go to `models/step_detector/<sim|real>/` and figures to
+`docs/figures/step_detector/<sim|real>/`. How it works, in plain language:
+[docs/step_detector.md](docs/step_detector.md).
 
 ## Results
 

@@ -8,8 +8,8 @@
 # Either way 'app start' recompiles and reflashes the MCU, so power-cycle the
 # board afterwards (see CLAUDE.md).
 #
-# Training scripts copy their exported models into board/python/models/
-# (training/shared.py copy_to_app); this checks each copy matches models/.
+# If a trained model is copied into board/python/models/ for the board app to
+# load, this checks each copy still matches its original in models/.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

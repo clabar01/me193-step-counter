@@ -1,10 +1,9 @@
 """Check trials: thigh gyro, ultrasonic distance and echo/timeout on one figure.
 
 Strides are marked at each swing peak of the thigh gyro gy (the large positive
-peak as this leg swings forward; one per stride, i.e. every 2 steps). Peaks
-closer than 0.6 stride periods (from the gy autocorrelation) or lower than half
-the typical peak are ignored, so double bumps and the first/last half-steps
-don't count. Echoes closer than CLOSE_MM are drawn as "other thigh", the rest
+peak as this leg swings forward; one per stride, i.e. every 2 steps), found by
+the same gyro stride detector the step-detector baseline uses
+(training/step_detector/strides.py). Echoes closer than CLOSE_MM are drawn as "other thigh", the rest
 as "past the thigh"; the distance panel is log-scaled so both show.
 
 The thighs pass each other twice per stride: while this leg swings (near its
@@ -24,10 +23,14 @@ import argparse
 import json
 from pathlib import Path
 
+import sys
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from scipy.signal import find_peaks
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "training" / "step_detector"))
+from strides import swing_peaks  # noqa: E402
 
 CLOSE_MM = 100
 MERGE_GAP = 2               # close echoes this many samples apart or fewer are one burst
@@ -63,21 +66,6 @@ def bursts(mask):
     return list(zip(starts, ends))
 
 
-def stride_period(gy, moving):
-    """Stride period in samples, from the gy autocorrelation while moving (0.6-2.5 s)."""
-    w = gy[moving] - gy[moving].mean()
-    ac = np.correlate(w, w, "full")[len(w) - 1:]
-    lo, hi = 600 // SAMPLE_MS, min(2500 // SAMPLE_MS, len(ac) - 1)
-    return lo + int(np.argmax(ac[lo:hi]))
-
-
-def swing_peaks(gy, period):
-    peaks, props = find_peaks(gy, distance=int(0.6 * period), height=0)
-    if not len(peaks):
-        return peaks
-    return peaks[props["peak_heights"] >= 0.5 * np.median(props["peak_heights"])]
-
-
 def standing(r, mask):
     n = mask.sum()
     if not n:
@@ -96,10 +84,9 @@ def analyse(df):
 
     gnorm = np.sqrt(df["gx"] ** 2 + df["gy"] ** 2 + df["gz"] ** 2)
     still = (gnorm.rolling(1000 // SAMPLE_MS, center=True, min_periods=1).max() < STILL_DPS).to_numpy()
-    period = stride_period(gy, ~still)
-    strides = swing_peaks(gy, period)
+    strides, period = swing_peaks(gy)
     s = t[strides]
-    half = period * SAMPLE_MS / 1000 / 2
+    half = (period or 30) * SAMPLE_MS / 1000 / 2
 
     # this leg's pass at each swing peak, the other leg's half a stride later (between peaks)
     this_ev, other_ev = s, (s[:-1] + s[1:]) / 2

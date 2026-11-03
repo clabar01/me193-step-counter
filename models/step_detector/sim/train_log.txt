@@ -1,0 +1,35 @@
+data: data/sim/raw  (SIMULATED); 70 trials, skipped 0 bench_*
+split by trial: train 48, val 13, test (session C) 9
+model: 17401 parameters, receptive field 121 samples (2.4 s), device mps
+  warm start 1/15: pseudo-label loss 0.552
+  warm start 2/15: pseudo-label loss 0.462
+  warm start 3/15: pseudo-label loss 0.431
+  warm start 4/15: pseudo-label loss 0.419
+  warm start 5/15: pseudo-label loss 0.413
+  warm start 6/15: pseudo-label loss 0.411
+  warm start 7/15: pseudo-label loss 0.410
+  warm start 8/15: pseudo-label loss 0.408
+  warm start 9/15: pseudo-label loss 0.408
+  warm start 10/15: pseudo-label loss 0.406
+  warm start 11/15: pseudo-label loss 0.406
+  warm start 12/15: pseudo-label loss 0.405
+  warm start 13/15: pseudo-label loss 0.403
+  warm start 14/15: pseudo-label loss 0.399
+  warm start 15/15: pseudo-label loss 0.398
+  fine-tune 1: train count loss 2382.20, val error 28.77 steps (peaks), 10.10 (sum)
+  fine-tune 100: train count loss 4.97, val error 2.38 steps (peaks), 1.32 (sum)
+  fine-tune 200: train count loss 0.45, val error 0.62 steps (peaks), 0.68 (sum)
+  fine-tune 300: train count loss 1.92, val error 0.38 steps (peaks), 0.96 (sum)
+  stopped at epoch 364: no better validation count for 80 epochs
+  kept epoch 284: val error 0.23 steps (peaks), 0.55 (sum)
+
+              trials  steps (counted)  gyro detector MAE  gyro detector total %  CNN peaks MAE  CNN peaks total %  CNN sum MAE  CNN sum total %  CNN peaks MAE vs true  F1 CNN  F1 gyro
+train           48.0           1618.0               0.71                    0.6           0.60               -1.5         0.42             -0.7                   0.60   0.982    0.943
+val             13.0            450.0               0.62                    0.0           0.23               -0.2         0.55             -0.2                   0.15   0.987    0.987
+test             9.0            446.0               0.89                   -0.4           0.89               -1.8         1.26             -1.6                   1.00   0.983    0.986
+test: fast       2.0            102.0               1.00                    0.0           0.50               -1.0         1.96             -0.0                   1.00   0.990    0.995
+test: jog        2.0             94.0               1.00                   -2.1           0.50               -1.1         0.21              0.1                   0.50   0.993    0.988
+test: normal     3.0            163.0               1.00                   -0.6           1.00               -1.8         1.54             -2.8                   1.00   0.990    0.988
+test: slow       2.0             87.0               0.50                    1.1           1.50               -3.4         1.20             -2.8                   1.50   0.958    0.970
+
+saved models/step_detector/sim/ (model.pt, norm.json, results.md/.csv, history.json) and docs/figures/step_detector/sim/
