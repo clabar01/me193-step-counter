@@ -56,16 +56,25 @@ def longest_run(mask):
     return best
 
 
-def step_features(x):
-    """(steps, n_features) array for one trial's preprocessed (N, 8) inputs, plus step indices."""
+def step_features(x, steps=None):
+    """(steps, n_features) array for one trial's preprocessed (N, 8) inputs, plus step indices.
+
+    steps: sample indices of the steps to describe (e.g. the CNN's, as on the
+    board); by default the gyro stride detector's steps in the main walking bout."""
     gy = x[:, IX["gy"]].astype(float)
-    peaks, period = swing_peaks(gy)
-    bout = walking_bout(peaks)
-    if len(bout) < 2:
-        return np.zeros((0, len(FEATURES))), np.array([], dtype=int)
-    stride = int(np.median(np.diff(bout)))
-    lo, hi = bout[0] - stride, bout[-1] + stride        # half-steps at the ends belong to the bout
-    steps = np.array([s for s in step_times(gy) if lo <= s <= hi])
+    if steps is None:
+        peaks, period = swing_peaks(gy)
+        bout = walking_bout(peaks)
+        if len(bout) < 2:
+            return np.zeros((0, len(FEATURES))), np.array([], dtype=int)
+        stride = int(np.median(np.diff(bout)))
+        lo, hi = bout[0] - stride, bout[-1] + stride        # half-steps at the ends belong to the bout
+        steps = np.array([s for s in step_times(gy) if lo <= s <= hi])
+    else:
+        steps = np.asarray(steps, dtype=int)
+        if len(steps) < 2:
+            return np.zeros((0, len(FEATURES))), steps
+        stride = int(2 * np.median(np.diff(steps)))
     acc = np.linalg.norm(x[:, :3], axis=1)
     us, near = x[:, IX["us_mm"]], x[:, IX["us_hit"]] == 1
 

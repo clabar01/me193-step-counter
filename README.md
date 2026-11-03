@@ -54,7 +54,7 @@ pip install -r requirements.txt
 | `training/` | `simulator.py` (+ `sim_template.json`), `step_detector/` (CNN step counter: data, model, losses, training, tests), `step_length/` (step-length MLP + baselines) |
 | `scripts/` | `make_sim_dataset.py` (fake dataset), `fit_sim_template.py` (simulator stride from real trials) |
 | `models/` | trained models: `step_detector/<sim or real>/` (weights `model.pt` stay local) |
-| `analysis/` | `plot_raw.py` (one trial), `plot_us_gyro.py` (gyro vs ultrasonic check); figures in `docs/figures/` |
+| `analysis/` | `evaluate.py` (uncertainty analysis -> `results.md`), `plot_raw.py` (one trial), `plot_us_gyro.py` (gyro vs ultrasonic check), `measure_latency.py`; figures in `docs/figures/` |
 | `dashboard/` | `dashboard.html` (live step counter, distance, cadence, step-detector plot, avatar) and `trial.html` (record trials): `python dashboard/serve.py` |
 | `animation/` | `explainer.html` (animated 7-scene explainer from real data in `data/story.json`, made by `record_training.py`), 3D avatar (`avatar.glb`) and `shrink_glb.py` |
 | `docs/` | write-up, [`step_detector.md`](docs/step_detector.md) (how the CNN works), figures |
@@ -170,6 +170,19 @@ once, so overlapping windows never count a step twice; steps therefore appear
 about 1.3-1.5 s after they happen. Each step's length is computed when the next
 step arrives (it needs the step time). `training/step_detector/test_live_steps.py`
 checks the live pipeline finds the same steps as the offline one on the real trials.
+
+### Evaluation
+
+```bash
+python analysis/evaluate.py             # validation trials as a stand-in test set
+python analysis/evaluate.py --test C    # Session C, the real held-out test set
+```
+
+Writes [analysis/results.md](analysis/results.md): step-count and distance
+errors with 95% bootstrap confidence intervals by speed, an ablation of the
+ultrasonic (3 seeds each), how step-count errors become distance errors, and
+the limitations. Figures go to `docs/figures/evaluation/<val|C>/`. Session C
+trials must be saved with session `C`.
 
 ## Results
 

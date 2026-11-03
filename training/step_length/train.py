@@ -87,7 +87,7 @@ def fit_mlp(feats, distances, seed, on_update=None):
     xs = [torch.tensor((f - mean) / std, dtype=torch.float32) for f in feats]
     d = torch.tensor(distances, dtype=torch.float32)
     torch.manual_seed(seed)
-    model = StepLengthMLP()
+    model = StepLengthMLP(n_in=feats[0].shape[1])
     # Start at the fixed-mean answer: softplus(bias) = average step length, so the
     # MLP only has to learn how steps differ from average.
     avg = float(d.sum() / sum(len(f) for f in feats))
