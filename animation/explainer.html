@@ -1,0 +1,717 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Step Counter Explainer</title>
+<link rel="icon" href="data:,">
+<!--
+  ME193 step counter: an animated explainer in 7 scenes (~2:50), drawn on a
+  1920x1080 canvas from real data: animation/data/story.json, written by
+  animation/record_training.py (a same-seed re-run of the real training,
+  identical to the committed models).
+  Open it through the local server (a double-clicked file can't load the JSON):
+      python dashboard/serve.py   ->   http://localhost:8000/animation/explainer.html
+  Keys: space play/pause, left/right previous/next scene, F fullscreen,
+  R "play all" for recording (hides the controls), Esc leaves it.
+-->
+<style>
+  :root { --bg: #111110; --text: #f0efec; --muted: #8f8e86; --border: #2e2e2b; --surface: #1a1a19; }
+  html, body { margin: 0; height: 100%; background: #000; color: var(--text);
+               font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+  #stage { position: fixed; inset: 0; display: grid; place-items: center; }
+  canvas { display: block; background: var(--bg); }
+  .controls {
+    position: fixed; right: 14px; top: 14px;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: center;
+    padding: 8px 12px; border-radius: 14px; max-width: calc(100vw - 32px);
+    background: rgba(26, 26, 25, 0.88); border: 1px solid var(--border);
+    transition: opacity 0.3s;
+  }
+  .controls button {
+    font: inherit; font-size: 15px; color: var(--text); cursor: pointer;
+    background: transparent; border: 1px solid var(--border); border-radius: 9px; padding: 6px 11px;
+  }
+  .controls button:hover { background: #262624; }
+  .controls button.on { background: var(--text); color: var(--bg); border-color: var(--text); }
+  .controls .time { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 14px; min-width: 92px; text-align: center; }
+  .controls .rec { border-color: #e66767; color: #e66767; }
+  body.recording .controls { opacity: 0; pointer-events: none; }
+  body.recording { cursor: none; }
+  body:not(.recording) .controls:hover { opacity: 1; }
+  #error { position: fixed; inset: 0; display: none; place-items: center; padding: 24px; text-align: center; color: var(--muted); }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv" width="1920" height="1080" aria-label="Animated explainer of the ME193 step counter"></canvas></div>
+<div class="controls" id="controls">
+  <button id="back" title="Previous scene (left arrow)">◀ Back</button>
+  <button id="play" title="Play / pause (space)">Pause</button>
+  <button id="next" title="Next scene (right arrow)">Next ▶</button>
+  <span id="chips"></span>
+  <span class="time" id="time">0:00 / 0:00</span>
+  <button id="rec" class="rec" title="Restart from scene 1 full screen with the controls hidden (R); Esc leaves">● Play all for recording</button>
+</div>
+<div id="error"></div>
+
+<script>
+"use strict";
+const W = 1920, H = 1080, FS = 50;
+const C = {
+  bg: "#111110", surface: "#1a1a19", grid: "#2e2e2b", text: "#f0efec", text2: "#c3c2b7", muted: "#8f8e86",
+  accel: "#3987e5", gyro: "#d95926", us: "#199e70", hit: "#c98500", model: "#9085e9", loss: "#e66767",
+};
+const CH = [  // the 8 input channels, coloured by sensor
+  { name: "accel x", color: C.accel }, { name: "accel y", color: C.accel }, { name: "accel z", color: C.accel },
+  { name: "gyro x", color: C.gyro }, { name: "gyro y (swing)", color: C.gyro }, { name: "gyro z", color: C.gyro },
+  { name: "distance to other leg", color: C.us }, { name: "echo", color: C.hit },
+];
+const cv = document.getElementById("cv"), ctx = cv.getContext("2d");
+let S = null;               // story.json
+let D = null, L = null;     // its detector / length parts
+
+// ---------------- helpers ----------------
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, k) => a + (b - a) * k;
+const ease = (k) => { k = clamp(k); return k * k * (3 - 2 * k); };
+const seg = (t, a, b) => ease((t - a) / (b - a));         // 0 before a, 1 after b, smooth between
+function alpha(a, fn) { ctx.save(); ctx.globalAlpha *= clamp(a); fn(); ctx.restore(); }
+function text(s, x, y, { size = 28, color = C.text, align = "left", weight = 500, base = "alphabetic" } = {}) {
+  ctx.font = `${weight} ${size}px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
+  ctx.fillStyle = color; ctx.textAlign = align; ctx.textBaseline = base;
+  ctx.fillText(s, x, y);
+}
+function rrect(x, y, w, h, r, fill, stroke, lw = 2) {
+  ctx.beginPath(); ctx.roundRect(x, y, w, h, r);
+  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke(); }
+}
+function line(pts, color, lw = 3) {
+  if (pts.length < 2) return;
+  ctx.beginPath(); ctx.moveTo(pts[0][0], pts[0][1]);
+  for (const p of pts.slice(1)) ctx.lineTo(p[0], p[1]);
+  ctx.strokeStyle = color; ctx.lineWidth = lw; ctx.lineJoin = "round"; ctx.lineCap = "round"; ctx.stroke();
+}
+function dot(x, y, r, fill, ring = C.bg) {
+  ctx.beginPath(); ctx.arc(x, y, r, 0, 2 * Math.PI); ctx.fillStyle = fill; ctx.fill();
+  if (ring) { ctx.lineWidth = 2; ctx.strokeStyle = ring; ctx.stroke(); }
+}
+function arrow(x0, y0, x1, y1, color, lw = 3, head = 14) {
+  line([[x0, y0], [x1, y1]], color, lw);
+  const a = Math.atan2(y1 - y0, x1 - x0);
+  ctx.beginPath(); ctx.moveTo(x1, y1);
+  ctx.lineTo(x1 - head * Math.cos(a - 0.45), y1 - head * Math.sin(a - 0.45));
+  ctx.lineTo(x1 - head * Math.cos(a + 0.45), y1 - head * Math.sin(a + 0.45));
+  ctx.closePath(); ctx.fillStyle = color; ctx.fill();
+}
+// a series drawn into a box: values[i0..i1) scaled to [lo, hi]
+function trace(values, i0, i1, box, lo, hi, color, lw = 2.5) {
+  const n = i1 - i0, pts = [];
+  const step = Math.max(1, Math.floor(n / box.w));
+  for (let i = i0; i < i1; i += step) {
+    pts.push([box.x + box.w * (i - i0) / (n - 1), box.y + box.h * (1 - (clamp(values[i], lo, hi) - lo) / (hi - lo))]);
+  }
+  line(pts, color, lw);
+}
+const range = (a) => { let lo = Infinity, hi = -Infinity; for (const v of a) { lo = Math.min(lo, v); hi = Math.max(hi, v); } return [lo, hi]; };
+function grid(box, ys, lo, hi) {
+  ctx.strokeStyle = C.grid; ctx.lineWidth = 1.5;
+  for (const v of ys) {
+    const y = box.y + box.h * (1 - (v - lo) / (hi - lo));
+    ctx.beginPath(); ctx.moveTo(box.x, y); ctx.lineTo(box.x + box.w, y); ctx.stroke();
+  }
+}
+function mass(y) {   // 100 ms moving sum (what is counted)
+  const m = new Float32Array(y.length);
+  for (let i = 0; i < y.length; i++) for (let k = -2; k <= 2; k++) m[i] += y[i + k] || 0;
+  return m;
+}
+function blendSnaps(snaps, k) {  // k in [0, snaps.length - 1]: blended output array
+  const i = Math.min(Math.floor(k), snaps.length - 2), f = ease(k - i);
+  const a = snaps[i].y, b = snaps[i + 1].y;
+  return { y: a.map((v, j) => lerp(v, b[j], f)), snap: f < 0.5 ? snaps[i] : snaps[i + 1] };
+}
+function heatCanvas(rows, color) {  // offscreen canvas: one pixel per value, brightness = value / max
+  const h = rows.length, w = rows[0].length;
+  let mx = 1e-9; for (const r of rows) for (const v of r) mx = Math.max(mx, v);
+  const oc = document.createElement("canvas"); oc.width = w; oc.height = h;
+  const g = oc.getContext("2d"), img = g.createImageData(w, h);
+  const [cr, cg, cb] = [1, 3, 5].map((i) => parseInt(color.slice(i, i + 2), 16));
+  const [br, bgc, bb] = [0x1a, 0x1a, 0x19];
+  rows.forEach((r, y) => r.forEach((v, x) => {
+    const k = Math.pow(clamp(v / mx), 0.6), o = 4 * (y * w + x);
+    img.data[o] = lerp(br, cr, k); img.data[o + 1] = lerp(bgc, cg, k); img.data[o + 2] = lerp(bb, cb, k); img.data[o + 3] = 255;
+  }));
+  g.putImageData(img, 0, 0);
+  return oc;
+}
+function wrap(s, maxW, size) {
+  ctx.font = `500 ${size}px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
+  const words = s.split(" "), lines = [];
+  let cur = "";
+  for (const w of words) {
+    const t = cur ? cur + " " + w : w;
+    if (ctx.measureText(t).width > maxW && cur) { lines.push(cur); cur = w; } else cur = t;
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+// ---------------- scenes ----------------
+// Each scene: title, duration (s), captions [[from, to, text]], draw(t).
+const SCENES = [];
+
+// 1. Hardware ------------------------------------------------------------
+SCENES.push({
+  title: "The hardware", dur: 18,
+  captions: [
+    [0.6, 6, "Two sensors ride on a strap just above the knee."],
+    [6, 12, "The IMU feels how the thigh speeds up and turns. The ultrasonic sensor measures the distance to the other leg."],
+    [12, 17.4, "Fifty times a second, every reading streams to the AirFour board on the hip."],
+  ],
+  draw(t) {
+    const hip = [640, 380], thigh = 230, shin = 230, ground = 860;
+    const ph = 2 * Math.PI * t / 1.25, swing = 0.38;
+    const leg = (a, front) => {
+      const bend = Math.max(0, Math.sin(ph + (front ? 0 : Math.PI) + 0.7)) * 0.7;
+      const knee = [hip[0] + thigh * Math.sin(a), hip[1] + thigh * Math.cos(a)];
+      const foot = [knee[0] + shin * Math.sin(a - bend), knee[1] + shin * Math.cos(a - bend)];
+      return { knee, foot, a };
+    };
+    const far = leg(-swing * Math.sin(ph), false), near = leg(swing * Math.sin(ph), true);
+    line([[380, ground], [900, ground]], C.grid, 3);
+    // body
+    alpha(0.45, () => line([hip, far.knee, far.foot], C.text2, 26));
+    line([hip, [hip[0] + 10, 130]], C.text, 30);
+    dot(hip[0] + 14, 80, 46, C.text, null);
+    line([hip, near.knee, near.foot], C.text, 30);
+    // AirFour on the hip
+    const box = [hip[0] - 150, hip[1] - 60];
+    rrect(box[0], box[1], 92, 66, 10, C.surface, C.muted, 3);
+    text("AirFour", box[0] + 46, box[1] + 42, { size: 18, align: "center", color: C.text2, weight: 600 });
+    // sensors just above the knee of the near leg
+    const at = (k) => [lerp(hip[0], near.knee[0], k), lerp(hip[1], near.knee[1], k)];
+    const imu = at(0.8), us = at(0.62);
+    ctx.save(); ctx.translate(imu[0], imu[1]); ctx.rotate(-near.a);
+    rrect(-24, -20, 48, 40, 6, C.accel, null); rrect(-24, -20, 24, 40, 6, C.gyro, null);
+    ctx.restore();
+    ctx.save(); ctx.translate(us[0], us[1]); ctx.rotate(-near.a);
+    rrect(-26, -16, 52, 32, 6, C.us, null);
+    ctx.restore();
+    // ultrasonic pulses towards the other leg
+    const farMid = [lerp(hip[0], far.knee[0], 0.62), lerp(hip[1], far.knee[1], 0.62)];
+    for (let k = 0; k < 3; k++) {
+      const p = ((t * 1.6 + k / 3) % 1);
+      const x = lerp(us[0], farMid[0] - 10, p), y = lerp(us[1], farMid[1], p);
+      alpha((1 - p) * seg(t, 3, 5), () => { ctx.beginPath(); ctx.arc(x, y, 10 + 18 * p, -0.9, 0.9);
+        ctx.strokeStyle = C.us; ctx.lineWidth = 3; ctx.stroke(); });
+    }
+    // wire + data packets to the board
+    const wire = (k) => [lerp(imu[0] - 30, box[0] + 46, k), lerp(imu[1], box[1] + 66, k) + 60 * Math.sin(Math.PI * k)];
+    alpha(seg(t, 10, 12), () => {
+      const pts = []; for (let k = 0; k <= 1.0001; k += 0.05) pts.push(wire(k));
+      line(pts, C.grid, 3);
+      for (let k = 0; k < 6; k++) {
+        const p = (t * 0.8 + k / 6) % 1;
+        dot(...wire(p), 7, [C.accel, C.gyro, C.us][k % 3], null);
+      }
+    });
+    // labels on the right
+    const items = [
+      [1, C.accel, "IMU: acceleration", "how the thigh speeds up and jolts (3 axes)"],
+      [3, C.gyro, "IMU: rotation", "how fast the thigh swings and twists (3 axes)"],
+      [6.5, C.us, "Ultrasonic sensor", "distance to the other leg, under 15 cm"],
+      [12, C.text2, "AirFour board", "reads all of it 50 times a second"],
+    ];
+    items.forEach(([at0, col, a, b], i) => alpha(seg(t, at0, at0 + 1.2), () => {
+      const y = 260 + i * 140;
+      dot(1060, y - 10, 13, col, null);
+      text(a, 1095, y, { size: 38, weight: 650 });
+      text(b, 1095, y + 44, { size: 28, color: C.text2 });
+    }));
+  },
+});
+
+// 2. Inputs ----------------------------------------------------------------
+SCENES.push({
+  title: "What the network reads", dur: 22,
+  captions: [
+    [0.6, 7.5, () => `Eight numbers per sample, from one of your real walks (trial ${D.trial}, ${D.counted} steps).`],
+    [7.5, 14.5, "Every step shows up as a swing in the rotation and a jolt in the acceleration."],
+    [14.5, 21.4, "To judge one moment, the network looks at the 2.4 seconds around it."],
+  ],
+  draw(t) {
+    const X = D.x, n = X[0].length, view = 10 * FS;
+    const start = Math.round(lerp(3 * FS, Math.min(n - view, 17 * FS), t / this.dur));
+    const box0 = { x: 330, w: 1460 }, top = 140, rowH = 92;
+    X.forEach((ch, r) => {
+      const box = { ...box0, y: top + r * rowH + 12, h: rowH - 26 };
+      alpha(seg(t, 0.3 + r * 0.25, 1.2 + r * 0.25), () => {
+        text(CH[r].name, 300, box.y + box.h / 2 + 10, { size: 26, align: "right", color: CH[r].color, weight: 600 });
+        ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.moveTo(box.x, box.y + box.h); ctx.lineTo(box.x + box.w, box.y + box.h); ctx.stroke();
+        let [lo, hi] = r === 6 ? [0, 150] : r === 7 ? [0, 1] : range(ch);
+        if (r === 7) {
+          ctx.fillStyle = CH[r].color;
+          for (let i = start; i < start + view; i++) if (ch[i] > 0.5) ctx.fillRect(box.x + box.w * (i - start) / view, box.y + 8, box.w / view + 0.6, box.h - 8);
+        } else trace(ch, start, start + view, box, lo, hi, CH[r].color, 2.5);
+      });
+    });
+    // the CNN's window: 121 samples = 2.42 s, centred
+    alpha(seg(t, 14.5, 16), () => {
+      const w = box0.w * 121 / view, x = box0.x + box0.w / 2 - w / 2;
+      rrect(x, top, w, rowH * 8, 10, "rgba(144,133,233,0.16)", C.model, 3);
+      line([[x + w / 2, top - 6], [x + w / 2, top + rowH * 8 + 6]], C.model, 2);
+      text("2.4 s the network sees", x + w / 2, top - 16, { size: 26, align: "center", color: C.model, weight: 650 });
+    });
+    text(`${(start / FS).toFixed(0)} s`, box0.x, top + rowH * 8 + 30, { size: 22, color: C.muted });
+    text(`${((start + view) / FS).toFixed(0)} s`, box0.x + box0.w, top + rowH * 8 + 30, { size: 22, color: C.muted, align: "right" });
+  },
+});
+
+// 3. Forward pass ------------------------------------------------------------
+let heat = null;
+SCENES.push({
+  title: "Inside the step detector", dur: 28,
+  captions: [
+    [0.6, 7, "A small filter slides along the signals, scoring how much each moment matches a pattern."],
+    [7, 15, "Four layers of 24 filters each. Every layer builds on the last and sees a longer stretch of time."],
+    [15, 21.5, "The last layer gives one number per moment: how much of a step happens right here."],
+    [21.5, 27.4, "Each bump that rises above 0.5 is counted as one step."],
+  ],
+  draw(t) {
+    const [a, b] = D.window, n = b - a;
+    heat = heat || D.feature_maps.map((m) => heatCanvas(m, C.model));
+    const inBox = { x: 110, y: 160, w: 520, h: 440 };
+    text("input: 4 s of the walk", inBox.x, inBox.y - 20, { size: 26, color: C.text2, weight: 600 });
+    D.x.forEach((ch, r) => {
+      const box = { x: inBox.x, y: inBox.y + r * 55 + 6, w: inBox.w, h: 42 };
+      if (r === 7) {
+        ctx.fillStyle = C.hit;
+        for (let i = a; i < b; i++) if (ch[i] > 0.5) ctx.fillRect(box.x + box.w * (i - a) / n, box.y + 10, box.w / n + 0.5, box.h - 10);
+      } else {
+        const [lo, hi] = r === 6 ? [0, 150] : range(ch.slice(a, b));
+        trace(ch, a, b, box, lo, hi, CH[r].color, 2.2);
+      }
+    });
+    // kernel sliding (9 samples), then stays
+    const kx = inBox.x + inBox.w * seg(t, 1, 7) * (1 - 9 / n);
+    alpha(1 - seg(t, 7.5, 8.5), () => rrect(kx, inBox.y - 4, inBox.w * 9 / n, inBox.h + 8, 6, "rgba(240,239,236,0.10)", C.text, 3));
+    // layers
+    const lx = 900, lw = 600, lh = 96, rf = [9, 25, 57, 121];
+    heat.forEach((hc, i) => {
+      const y = 160 + i * 120;
+      const reveal = i === 0 ? seg(t, 1, 7) : seg(t, 7 + (i - 1) * 2.6, 9.4 + (i - 1) * 2.6);
+      alpha(i === 0 ? seg(t, 0.8, 1.6) : seg(t, 6.6 + (i - 1) * 2.6, 7.4 + (i - 1) * 2.6), () => {
+        rrect(lx - 4, y - 4, lw + 8, lh + 8, 8, null, C.grid, 2);
+        ctx.save(); ctx.beginPath(); ctx.rect(lx, y, lw * reveal, lh); ctx.clip();
+        ctx.imageSmoothingEnabled = false; ctx.drawImage(hc, lx, y, lw, lh); ctx.restore();
+        text(`layer ${i + 1}`, lx - 22, y + 44, { size: 26, align: "right", weight: 650 });
+        text(`24 filters · sees ${(rf[i] / FS).toFixed(2)} s`, lx - 22, y + 76, { size: 20, align: "right", color: C.muted });
+      });
+    });
+    alpha(seg(t, 1.5, 2.5) * (1 - seg(t, 7.5, 8.5)), () => arrow(inBox.x + inBox.w + 30, 330, lx - 140, 220, C.text2, 3));
+    // output
+    const m = D.final_mass.slice(a, b), ob = { x: lx, y: 680, w: lw, h: 180 };
+    alpha(seg(t, 15, 16.5), () => {
+      text("step output (100 ms sum)", ob.x, ob.y - 18, { size: 24, color: C.text2, weight: 600 });
+      grid(ob, [0, 0.5, 1], 0, 1.3);
+      ctx.save(); ctx.setLineDash([8, 8]);
+      line([[ob.x, ob.y + ob.h * (1 - 0.5 / 1.3)], [ob.x + ob.w, ob.y + ob.h * (1 - 0.5 / 1.3)]], C.muted, 2);
+      ctx.restore();
+      const k = seg(t, 15.5, 21);
+      ctx.save(); ctx.beginPath(); ctx.rect(ob.x, ob.y - 10, ob.w * k, ob.h + 20); ctx.clip();
+      trace(m, 0, n, ob, 0, 1.3, C.model, 3.5); ctx.restore();
+    });
+    const pk = D.final_steps.filter((s) => s >= a && s < b).map((s) => s - a);
+    let shown = 0;
+    pk.forEach((p, j) => {
+      const at0 = 21.8 + j * 0.9;
+      if (t < at0) return;
+      shown++;
+      const x = ob.x + ob.w * p / (n - 1), y = ob.y + ob.h * (1 - Math.min(m[p], 1.3) / 1.3);
+      dot(x, y, 11 + 6 * (1 - seg(t, at0, at0 + 0.4)), C.text);
+    });
+    alpha(seg(t, 21.5, 22.5), () => {
+      text("steps", 1640, 740, { size: 32, color: C.text2, align: "center" });
+      text(String(shown), 1640, 850, { size: 120, weight: 800, align: "center" });
+    });
+  },
+});
+
+// 4. Training the step detector -------------------------------------------
+SCENES.push({
+  title: "Teaching it to count", dur: 26,
+  captions: [
+    [0.6, 6, "First, a warm start: copy the step times a simple rule finds in the thigh swing."],
+    [6, 11.5, "Each round of practice, the output moves closer to those marks."],
+    [11.5, 18.5, "Then the real lesson: add up the output over a whole walk and compare it with the steps you counted."],
+    [18.5, 25.4, "The count loss is (sum − your count)². It knows how many steps there were, never where."],
+  ],
+  draw(t) {
+    const snaps = D.snapshots, warm = snaps.filter((s) => s.stage === "warm");
+    const fine = snaps.filter((s) => s.stage !== "warm" && [1, 5, 20, 100].includes(s.epoch) || s.stage === "final");
+    const a = 3 * FS, b = 27 * FS, n = b - a;
+    const gyBox = { x: 150, y: 150, w: 1620, h: 170 }, outBox = { x: 150, y: 400, w: 1620, h: 190 };
+    const gy = D.x[4];
+    text("gyro y: the thigh swing", gyBox.x, gyBox.y - 16, { size: 24, color: C.gyro, weight: 600 });
+    trace(gy, a, b, gyBox, ...range(gy.slice(a, b)), C.gyro, 2.5);
+    alpha(seg(t, 1, 2.5) * (1 - seg(t, 11, 12)), () => {
+      text("▼ step times from the simple rule", gyBox.x + gyBox.w, gyBox.y - 16, { size: 22, color: C.text, align: "right" });
+      for (const s of D.pseudo_steps) if (s >= a && s < b) {
+        const x = gyBox.x + gyBox.w * (s - a) / n;
+        text("▼", x, gyBox.y + 8, { size: 20, align: "center" });
+        ctx.strokeStyle = "rgba(240,239,236,0.18)"; ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(x, gyBox.y + 12); ctx.lineTo(x, outBox.y + outBox.h); ctx.stroke();
+      }
+    });
+    // network output through the snapshots
+    const warmK = (warm.length - 1) * seg(t, 2, 11);
+    const fineK = fine.length * seg(t, 12, 24);
+    const cur = t < 11.5 ? blendSnaps(warm, warmK) : blendSnaps([warm[warm.length - 1], ...fine], fineK);
+    text("network output (step mass per 100 ms)", outBox.x, outBox.y - 16, { size: 24, color: C.model, weight: 600 });
+    grid(outBox, [0, 0.5, 1], 0, 1.3);
+    trace(mass(cur.y), a, b, outBox, 0, 1.3, C.model, 2.5);
+    const snap = cur.snap;
+    text(snap.stage === "warm" ? `warm start · round ${snap.epoch}` : snap.stage === "final" ? `count training · kept round ${snap.epoch}`
+         : `count training · round ${snap.epoch}`, outBox.x + outBox.w, outBox.y - 16, { size: 24, align: "right", color: C.text2 });
+    // warm-start loss (inset)
+    alpha(seg(t, 2, 3) * (1 - seg(t, 11, 12)), () => {
+      const pre = D.history.pretrain, box = { x: 1300, y: 690, w: 470, h: 170 };
+      text("warm-start loss", box.x, box.y - 14, { size: 22, color: C.loss, weight: 600 });
+      const k = Math.max(2, Math.round(pre.length * seg(t, 2, 11)));
+      trace(pre, 0, k, { ...box, w: box.w * k / pre.length }, Math.min(...pre), Math.max(...pre), C.loss, 3);
+    });
+    // count loss: sum bar vs counted bar
+    alpha(seg(t, 12, 13.5), () => {
+      const sum = cur.y.reduce((s, v) => s + v, 0), x0 = 420, scale = 1250 / 70;
+      text("sum of output", x0 - 20, 712, { size: 26, align: "right", color: C.model, weight: 600 });
+      rrect(x0, 680, Math.min(sum, 70) * scale, 44, 6, C.model);
+      text(sum.toFixed(1), x0 + Math.min(sum, 70) * scale + 14, 712, { size: 28, weight: 700 });
+      text("your count", x0 - 20, 782, { size: 26, align: "right", weight: 600 });
+      rrect(x0, 750, D.counted * scale, 44, 6, C.text);
+      text(String(D.counted), x0 + D.counted * scale + 14, 782, { size: 28, weight: 700 });
+      const loss = (sum - D.counted) ** 2;
+      text(`count loss = (${sum.toFixed(1)} − ${D.counted})² = ${loss < 10 ? loss.toFixed(2) : loss.toFixed(0)}`, 960, 880,
+           { size: 40, align: "center", color: C.loss, weight: 700 });
+    });
+  },
+});
+
+// 5. Backprop -----------------------------------------------------------------
+SCENES.push({
+  title: "Learning from mistakes", dur: 28,
+  captions: [
+    [0.6, 7.5, "Backpropagation traces the error back through every layer, to see how much each weight caused it."],
+    [7.5, 14, "Then every weight is nudged a little, against its share of the blame."],
+    [14, 21, "Hundreds of rounds of small nudges, and the loss falls."],
+    [21, 27.4, () => `The steps line up: ${D.snapshots[D.snapshots.length - 1].count} counted on a walk it never trained on (you counted ${D.counted}).`],
+  ],
+  draw(t) {
+    // network diagram
+    const names = ["input", "layer 1", "layer 2", "layer 3", "layer 4", "output"], keys = [null, "body.0.weight", "body.2.weight", "body.4.weight", "body.6.weight", "head.weight"];
+    const x0 = 140, dx = 150, y0 = 170, bh = 150;
+    const gi = t < 7.5 ? 0 : t < 14 ? 1 : 2, g = D.grads[gi];
+    const lg = (v) => Math.log10(v);
+    const [gmin, gmax] = [lg(50), lg(30000)];
+    names.forEach((nm, i) => {
+      const x = x0 + i * dx;
+      rrect(x, y0, 110, bh, 12, C.surface, i === 0 ? C.text2 : C.model, 3);
+      text(nm, x + 55, y0 + bh / 2 + 9, { size: 22, align: "center", weight: 600 });
+      if (keys[i]) {
+        const v = g.norms[keys[i]], h = 120 * clamp((lg(v) - gmin) / (gmax - gmin));
+        rrect(x + 30, y0 + bh + 150 - h, 50, h, 6, C.loss);
+      }
+      if (i < names.length - 1) arrow(x + 112, y0 + 50, x + dx - 4, y0 + 50, C.model, 2.5, 10);
+    });
+    const lx = x0 + 6 * dx;
+    rrect(lx, y0 + 25, 120, 100, 12, "rgba(230,103,103,0.15)", C.loss, 3);
+    text("loss", lx + 60, y0 + 84, { size: 26, align: "center", color: C.loss, weight: 700 });
+    arrow(lx - 38, y0 + 50, lx - 4, y0 + 50, C.model, 2.5, 10);
+    // gradient pulses flowing back
+    for (let k = 0; k < 3; k++) {
+      const p = ((t * 0.45 + k / 3) % 1), x = lerp(lx, x0 + 55, p);
+      alpha(seg(t, 1, 2), () => dot(x, y0 + bh - 25, 9, C.loss, null));
+    }
+    alpha(seg(t, 1, 2), () => arrow(lx + 60, y0 + bh - 25, x0 + 70, y0 + bh - 25, "rgba(230,103,103,0.35)", 2, 10));
+    text(`gradient size per layer (log), round ${g.epoch}`, x0, y0 + bh + 185, { size: 22, color: C.loss });
+    // tracked weights
+    const wf = D.weights.fine, k = Math.max(2, Math.round(wf.length * seg(t, 7.5, 21)));
+    alpha(seg(t, 7, 8), () => {
+      text("6 of the 17,401 weights, over training", 1180, 150, { size: 24, color: C.text2, weight: 600 });
+      for (let j = 0; j < 6; j++) {
+        const bx = { x: 1180 + (j % 3) * 210, y: 180 + Math.floor(j / 3) * 170, w: 180, h: 130 };
+        rrect(bx.x - 6, bx.y - 6, bx.w + 12, bx.h + 12, 8, null, C.grid, 2);
+        const col = wf.map((r) => r[j]), [lo, hi] = range(col);
+        trace(col, 0, k, { ...bx, w: bx.w * k / wf.length }, lo - 1e-4, hi + 1e-4, C.model, 2.5);
+        text(col[k - 1].toFixed(3), bx.x + bx.w, bx.y + bx.h + 30, { size: 20, align: "right", color: C.muted });
+      }
+    });
+    // loss curve (log)
+    const tc = D.history.finetune.train_count, lb = { x: 150, y: 600, w: 780, h: 260 };
+    alpha(seg(t, 13.5, 14.5), () => {
+      text("count loss on the training walks (log scale)", lb.x, lb.y - 18, { size: 24, color: C.loss, weight: 600 });
+      const lt = tc.map((v) => Math.log10(Math.max(v, 1e-2)));
+      const kk = Math.max(2, Math.round(tc.length * seg(t, 14, 21)));
+      grid(lb, [0, 1, 2, 3, 4], -1, 4.5);
+      trace(lt, 0, kk, { ...lb, w: lb.w * kk / tc.length }, -1, 4.5, C.loss, 3);
+      const best = D.history.best_epoch;
+      if (kk >= best) {
+        const bx = lb.x + lb.w * (best - 1) / tc.length;
+        line([[bx, lb.y], [bx, lb.y + lb.h]], C.text2, 2);
+        text(`kept: round ${best}`, bx + 10, lb.y + 24, { size: 20, color: C.text2 });
+      }
+      text(`round ${kk}: ${tc[kk - 1].toFixed(tc[kk - 1] < 10 ? 2 : 0)}`, lb.x + lb.w, lb.y + lb.h + 34, { size: 22, align: "right", color: C.text2 });
+    });
+    // predictions early -> final
+    alpha(seg(t, 20.5, 21.5), () => {
+      const pick = D.snapshots.filter((s) => (s.stage === "fine" && [1, 20, 100].includes(s.epoch)) || s.stage === "final");
+      const cur = blendSnaps(pick, (pick.length - 1) * seg(t, 21.5, 26));
+      const a = 3 * FS, b = 27 * FS, pb = { x: 1030, y: 600, w: 740, h: 260 };
+      text("output on a walk it never trained on", pb.x, pb.y - 18, { size: 24, color: C.model, weight: 600 });
+      grid(pb, [0, 0.5, 1], 0, 1.3);
+      trace(mass(cur.y), a, b, pb, 0, 1.3, C.model, 2.5);
+      const sn = cur.snap;
+      text(`${sn.stage === "final" ? `kept round ${sn.epoch}` : `round ${sn.epoch}`}: counted ${sn.count} · you counted ${D.counted}`, pb.x + pb.w, pb.y + pb.h + 34, { size: 24, align: "right", weight: 650 });
+    });
+  },
+});
+
+// 6. Distance ------------------------------------------------------------------
+SCENES.push({
+  title: "From steps to distance", dur: 28,
+  captions: [
+    [0.6, 7, "For distance, each step gets five numbers: its time, the thigh swing, the jolt, and two ultrasonic readings."],
+    [7, 13, "A second, smaller network turns those five numbers into a length for that step."],
+    [13, 21, "The lengths add up to a distance. Training compares the total with the tape-measured hallway, and the error flows back to the weights."],
+  ],
+  draw(t) {
+    const F = L.step_features, n = F.length;
+    const fcol = [C.gyro, C.gyro, C.accel, C.us, C.us], fname = ["step time", "thigh swing", "jolt (accel range)", "closest echo", "echo length"];
+    text(`${L.trial}: hallway walk, ${L.distance_m.toFixed(1)} m measured with tape, ${n} steps`, 150, 130, { size: 28, weight: 650 });
+    // features per step
+    fname.forEach((nm, j) => {
+      const y = 180 + j * 62;
+      alpha(seg(t, 0.6 + j * 0.5, 1.4 + j * 0.5), () => {
+        text(nm, 400, y + 34, { size: 24, align: "right", color: fcol[j], weight: 600 });
+        const col = F.map((r) => r[j]), [lo, hi] = range(col);
+        col.forEach((v, i) => {
+          const h = 8 + 38 * (v - lo) / (hi - lo + 1e-9);
+          ctx.fillStyle = fcol[j]; ctx.globalAlpha = 0.85;
+          ctx.fillRect(420 + i * (520 / n), y + 46 - h, 520 / n - 3, h);
+          ctx.globalAlpha = 1;
+        });
+      });
+    });
+    // MLP diagram 5 -> 16 -> 16 -> 1
+    const layers = [5, 16, 16, 1], mx = [1080, 1280, 1480, 1680], node = (li, k) => [mx[li], 190 + (k + 0.5) * 300 / layers[li]];
+    const snapI = Math.min(L.snapshots.length - 1, Math.floor(L.snapshots.length * seg(t, 13, 20.5)));
+    const sn = L.snapshots[snapI], grads = [sn.grads["net.0.weight"], sn.grads["net.2.weight"], sn.grads["net.4.weight"]];
+    alpha(seg(t, 6.5, 8), () => {
+      for (let li = 0; li < 3; li++) for (let a = 0; a < layers[li]; a++) for (let b = 0; b < layers[li + 1]; b++) {
+        line([node(li, a), node(li + 1, b)], "rgba(144,133,233,0.12)", 1);
+      }
+      layers.forEach((cnt, li) => { for (let k = 0; k < cnt; k++) dot(...node(li, k), li === 0 ? 12 : 8, li === 0 ? fcol[k] : C.model, C.bg); });
+      text("5 numbers", mx[0], 520, { size: 22, align: "center", color: C.text2 });
+      text("16", mx[1], 520, { size: 22, align: "center", color: C.text2 });
+      text("16", mx[2], 520, { size: 22, align: "center", color: C.text2 });
+      text("step length", mx[3], 520, { size: 22, align: "center", color: C.text2 });
+      // a step flowing forward
+      const p = (t * 0.7) % 1;
+      if (t < 13) dot(lerp(mx[0], mx[3], p), 340, 10, C.text, null);
+      // gradients flowing back while training
+      alpha(seg(t, 13, 14) * (1 - seg(t, 20.5, 21.5)), () => {
+        for (let k = 0; k < 3; k++) { const q = (t * 0.6 + k / 3) % 1; dot(lerp(mx[3], mx[0], q), 360, 9, C.loss, null); }
+        text("error flowing back", (mx[0] + mx[3]) / 2, 175, { size: 22, align: "center", color: C.loss, weight: 600 });
+      });
+    });
+    // distance track: step lengths stacking up
+    const tb = { x: 150, y: 640, w: 1620, h: 70 }, maxM = 32, X = (m) => tb.x + tb.w * m / maxM;
+    alpha(seg(t, 9, 10.5), () => {
+      const lengths = t < 13 ? L.snapshots[0].lengths : t > 20.5 ? L.final_lengths : sn.lengths;
+      const k = t < 13 ? Math.round(n * seg(t, 9.5, 12.8)) : n;
+      let acc = 0;
+      for (let i = 0; i < k; i++) {
+        rrect(X(acc) + 1, tb.y, X(acc + lengths[i]) - X(acc) - 2, tb.h, 5, i % 2 ? C.model : "#6f63c9");
+        acc += lengths[i];
+      }
+      ctx.save(); ctx.setLineDash([10, 8]);
+      line([[X(L.distance_m), tb.y - 40], [X(L.distance_m), tb.y + tb.h + 40]], C.text, 3); ctx.restore();
+      text(`measured ${L.distance_m.toFixed(1)} m`, X(L.distance_m), tb.y - 52, { size: 24, align: "center", weight: 650 });
+      for (const m of [0, 10, 20, 30]) text(`${m} m`, X(m), tb.y + tb.h + 34, { size: 20, align: "center", color: C.muted });
+      text(`predicted ${acc.toFixed(2)} m`, tb.x, tb.y + tb.h + 80, { size: 34, weight: 750, color: C.model });
+      if (t >= 13 && t <= 21) {
+        text(`training loss on the other 7 walks = ((sum − measured) / measured)² = ${sn.loss.toFixed(5)}  ·  update ${sn.step + 1}`,
+             tb.x + tb.w, tb.y + tb.h + 80, { size: 24, align: "right", color: C.loss, weight: 600 });
+      }
+    });
+    alpha(seg(t, 21, 22.5), () => {
+      const e = L.loo_mean_abs_err_pct;
+      text("Across all 8 hallway walks, each predicted by a network trained on the other 7:", 960, 870, { size: 30, align: "center" });
+      text(`step-length network ${e.mlp}% off   ·   Weinberg formula ${e.weinberg}%   ·   same length every step ${e.fixed}%`,
+           960, 925, { size: 32, align: "center", weight: 700, color: C.model });
+    });
+  },
+});
+
+// 7. Live system -------------------------------------------------------------
+SCENES.push({
+  title: "Live on the board", dur: 20,
+  captions: [
+    [0.6, 6.5, "On the board, both networks run four times a second on the last six seconds of data."],
+    [6.5, 12.5, "The results travel over the internet (MQTT) to the dashboard."],
+    [12.5, 17.5, "Each step appears on the dashboard about 1.5 seconds after it happens."],
+  ],
+  draw(t) {
+    const board = { x: 130, y: 300, w: 420, h: 300 }, cloud = [960, 450], dash = { x: 1300, y: 230, w: 500, h: 470 };
+    rrect(board.x, board.y, board.w, board.h, 20, C.surface, C.muted, 3);
+    text("AirFour", board.x + 30, board.y + 60, { size: 36, weight: 750 });
+    text("step detector (numpy)", board.x + 30, board.y + 120, { size: 26, color: C.model, weight: 600 });
+    text("step-length network", board.x + 30, board.y + 165, { size: 26, color: C.model, weight: 600 });
+    text("every 0.25 s · ~16 ms each", board.x + 30, board.y + 215, { size: 24, color: C.text2 });
+    text("50 samples/s in", board.x + 30, board.y + 262, { size: 24, color: C.text2 });
+    // cloud
+    alpha(seg(t, 5.5, 7), () => {
+      ctx.fillStyle = C.surface; ctx.strokeStyle = C.muted; ctx.lineWidth = 3;
+      ctx.beginPath();
+      for (const [dx, dy, r] of [[-90, 10, 70], [-20, -40, 90], [70, -10, 75], [120, 30, 55], [0, 40, 70]]) ctx.arc(cloud[0] + dx, cloud[1] + dy, r, 0, 2 * Math.PI);
+      ctx.fill();
+      text("MQTT broker", cloud[0], cloud[1] + 10, { size: 30, align: "center", weight: 700 });
+      for (let k = 0; k < 4; k++) {
+        const p = (t * 0.5 + k / 4) % 1;
+        dot(lerp(board.x + board.w + 20, cloud[0] - 150, p), lerp(450, 450, p), 9, C.model, null);
+        dot(lerp(cloud[0] + 170, dash.x - 20, p), 450, 9, C.model, null);
+      }
+    });
+    // dashboard mock: replay the counted steps of the real walk
+    alpha(seg(t, 7, 8.5), () => {
+      rrect(dash.x, dash.y, dash.w, dash.h, 20, C.surface, C.grid, 2);
+      const a = 5 * FS, span = 8 * FS, now = a + Math.round((t - 7) * FS);
+      const shown = D.final_steps.filter((s) => s >= a && s + 75 <= now).length;   // 1.5 s behind
+      text("Steps", dash.x + 30, dash.y + 55, { size: 26, color: C.text2 });
+      text(String(shown), dash.x + 30, dash.y + 175, { size: 120, weight: 800 });
+      const seen = D.final_steps.filter((s) => s >= a && s + 75 <= now), gaps = seen.slice(1).map((s, i) => s - seen[i]).sort((p, q) => p - q);
+      text("Cadence", dash.x + 280, dash.y + 55, { size: 26, color: C.text2 });
+      text(gaps.length ? `${Math.round(60 * FS / gaps[gaps.length >> 1])}` : "—", dash.x + 280, dash.y + 150, { size: 56, weight: 750 });
+      text("steps/min", dash.x + 280, dash.y + 185, { size: 22, color: C.text2 });
+      const pb = { x: dash.x + 30, y: dash.y + 250, w: dash.w - 60, h: 170 }, lo = Math.max(a, now - 75 - span);
+      grid(pb, [0, 0.5, 1], 0, 1.3);
+      const hi = Math.max(lo + 2, now - 75);
+      trace(D.final_mass, lo, hi, { ...pb, w: pb.w * (hi - lo) / span }, 0, 1.3, C.model, 2.5);
+      for (const s of D.final_steps) if (s >= lo && s < hi) dot(pb.x + pb.w * (s - lo) / span, pb.y + pb.h * (1 - Math.min(D.final_mass[s], 1.3) / 1.3), 7, C.text);
+      text("dashboard", dash.x + dash.w / 2, dash.y + dash.h + 46, { size: 26, align: "center", color: C.muted });
+    });
+    alpha(seg(t, 17.5, 18.8), () => {
+      ctx.fillStyle = "rgba(17,17,16,0.86)"; ctx.fillRect(0, 0, W, H);
+      text("ME193 · Step counter", 960, 500, { size: 72, align: "center", weight: 800 });
+      text("thigh IMU + ultrasonic · CNN step detector · step-length network · live on the board", 960, 575, { size: 30, align: "center", color: C.text2 });
+    });
+  },
+});
+
+// ---------------- player ----------------
+const starts = []; let total = 0;
+for (const s of SCENES) { starts.push(total); total += s.dur; }
+let T = 0, playing = true, lastNow = null, recording = false;
+const FADE = 0.6;
+
+function sceneAt(time) {
+  let i = SCENES.length - 1;
+  while (i > 0 && time < starts[i]) i--;
+  return i;
+}
+function fmt(s) { s = Math.max(0, Math.floor(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`; }
+
+function render() {
+  const i = sceneAt(T), sc = SCENES[i], t = T - starts[i];
+  const k = cv.width / W;                 // draw in 1920x1080 units at the canvas's real resolution
+  ctx.setTransform(k, 0, 0, k, 0, 0);
+  ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H);
+  ctx.globalAlpha = 1;
+  sc.draw(t);
+  // title
+  text(`${i + 1} · ${sc.title}`, 60, 70, { size: 30, color: C.muted, weight: 650 });
+  // caption
+  for (const [a, b, c] of sc.captions) {
+    const s = typeof c === "function" ? c() : c;
+    if (!s || t < a || t > b) continue;
+    const k = Math.min(seg(t, a, a + 0.4), 1 - seg(t, b - 0.4, b));
+    alpha(k, () => {
+      const lines = wrap(s, 1500, 40);
+      const y0 = H - 50 - (lines.length - 1) * 50;
+      lines.forEach((ln, j) => text(ln, W / 2, y0 + j * 50, { size: 40, align: "center", weight: 550 }));
+    });
+  }
+  // fade between scenes
+  const fade = Math.max(1 - clamp(t / FADE), i === SCENES.length - 1 ? 0 : clamp((t - sc.dur + FADE) / FADE));
+  if (fade > 0) { ctx.globalAlpha = fade; ctx.fillStyle = C.bg; ctx.fillRect(0, 0, W, H); ctx.globalAlpha = 1; }
+}
+
+function tick(now) {
+  if (lastNow !== null && playing) T = Math.min(total, T + (now - lastNow) / 1000);
+  lastNow = now;
+  if (T >= total && playing) { playing = false; if (recording) setTimeout(() => setRecording(false), 1500); }
+  if (S) render();
+  updateUI();
+  requestAnimationFrame(tick);
+}
+
+// ---------------- UI ----------------
+const $ = (id) => document.getElementById(id);
+const chips = SCENES.map((s, i) => {
+  const b = document.createElement("button");
+  b.textContent = String(i + 1); b.title = s.title;
+  b.onclick = () => { T = starts[i]; playing = true; };
+  $("chips").appendChild(b);
+  return b;
+});
+function updateUI() {
+  $("play").textContent = playing ? "Pause" : T >= total ? "Replay" : "Play";
+  $("time").textContent = `${fmt(T)} / ${fmt(total)}`;
+  const i = sceneAt(T);
+  chips.forEach((b, j) => b.classList.toggle("on", j === i));
+}
+function togglePlay() { if (T >= total) T = 0; playing = !playing; }
+function go(d) { const i = clamp(sceneAt(T) + d, 0, SCENES.length - 1); T = starts[i]; playing = true; }
+function setRecording(on) {
+  recording = on;
+  document.body.classList.toggle("recording", on);
+  if (on) { T = 0; playing = true; document.documentElement.requestFullscreen?.().catch(() => {}); }
+  else if (document.fullscreenElement) document.exitFullscreen();
+}
+$("play").onclick = togglePlay;
+$("back").onclick = () => go(-1);
+$("next").onclick = () => go(1);
+$("rec").onclick = () => setRecording(true);
+addEventListener("keydown", (e) => {
+  if (e.key === " ") { e.preventDefault(); togglePlay(); }
+  else if (e.key === "ArrowRight") go(1);
+  else if (e.key === "ArrowLeft") go(-1);
+  else if (e.key === "f" || e.key === "F") { document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen(); }
+  else if (e.key === "r" || e.key === "R") setRecording(true);
+  else if (e.key === "Escape" && recording) setRecording(false);
+});
+document.addEventListener("fullscreenchange", () => { if (!document.fullscreenElement && recording) setRecording(false); });
+
+function fit() {   // 16:9 canvas, as large as the window allows
+  const s = Math.min(innerWidth / W, innerHeight / H);
+  cv.style.width = `${W * s}px`; cv.style.height = `${H * s}px`;
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  const want = Math.round(W * Math.max(1, s * dpr));
+  if (cv.width !== want) { cv.width = want; cv.height = Math.round(want * H / W); }
+}
+addEventListener("resize", fit);
+fit();
+
+fetch("data/story.json").then((r) => { if (!r.ok) throw new Error(r.status); return r.json(); }).then((j) => {
+  S = j; D = j.detector; L = j.length;
+  if (new URLSearchParams(location.search).has("t")) T = Number(new URLSearchParams(location.search).get("t"));
+  if (new URLSearchParams(location.search).has("paused")) playing = false;
+}).catch((e) => {
+  $("error").style.display = "grid";
+  $("error").textContent = "Couldn't load data/story.json. Open this page through the local server: python dashboard/serve.py, then http://localhost:8000/animation/explainer.html";
+});
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

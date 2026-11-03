@@ -117,12 +117,16 @@ def val_errors(model, val, mean, std, device):
     return float(peak), float(total)
 
 
-def train(model, train_set, val, mean, std, device, args, log):
+def train(model, train_set, val, mean, std, device, args, log, on_epoch=None):
+    """on_epoch(stage, epoch, model), if given, is called before training ("warm", 0) and after
+    every epoch ("warm" / "fine"); animation/record_training.py uses it to take snapshots."""
     rng = random.Random(args.seed)
     history = {"pretrain": [], "finetune": {"train_count": [], "val_peak_mae": [], "val_sum_mae": []}}
     pseudo = {tr.name: step_times(tr.gy) for tr in train_set}
 
     # ---- warm start: learn "a step looks like this" from the gyro detector ----
+    if on_epoch:
+        on_epoch("warm", 0, model)
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     for epoch in range(args.pretrain_epochs):
         model.train()
@@ -137,6 +141,8 @@ def train(model, train_set, val, mean, std, device, args, log):
             opt.step()
             losses.append(loss.item())
         history["pretrain"].append(float(np.mean(losses)))
+        if on_epoch:
+            on_epoch("warm", epoch + 1, model)
         log(f"  warm start {epoch + 1}/{args.pretrain_epochs}: pseudo-label loss {history['pretrain'][-1]:.3f}")
 
     # ---- fine-tune on the real labels: how many steps each trial had ----
@@ -166,6 +172,8 @@ def train(model, train_set, val, mean, std, device, args, log):
         ft["train_count"].append(float(np.mean(losses)))
         ft["val_peak_mae"].append(peak_mae)
         ft["val_sum_mae"].append(sum_mae)
+        if on_epoch:
+            on_epoch("fine", epoch, model)
         if (peak_mae, sum_mae) < best:
             best, best_epoch, waited = (peak_mae, sum_mae), epoch, 0
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}

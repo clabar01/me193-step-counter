@@ -56,7 +56,7 @@ pip install -r requirements.txt
 | `models/` | trained models: `step_detector/<sim or real>/` (weights `model.pt` stay local) |
 | `analysis/` | `plot_raw.py` (one trial), `plot_us_gyro.py` (gyro vs ultrasonic check); figures in `docs/figures/` |
 | `dashboard/` | `dashboard.html` (live step counter, distance, cadence, step-detector plot, avatar) and `trial.html` (record trials): `python dashboard/serve.py` |
-| `animation/` | 3D avatar (`avatar.glb`) and `shrink_glb.py` |
+| `animation/` | `explainer.html` (animated 7-scene explainer from real data in `data/story.json`, made by `record_training.py`), 3D avatar (`avatar.glb`) and `shrink_glb.py` |
 | `docs/` | write-up, [`step_detector.md`](docs/step_detector.md) (how the CNN works), figures |
 
 MQTT: `broker.hivemq.com:1883`, topics under `ME193/ceci/steps/`:

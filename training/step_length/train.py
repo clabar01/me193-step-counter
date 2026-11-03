@@ -79,7 +79,7 @@ def baseline_terms(method, feats, leg_length):
     raise ValueError(method)
 
 
-def fit_mlp(feats, distances, seed):
+def fit_mlp(feats, distances, seed, on_update=None):
     """Train on whole trials (feats: list of (steps, 5) arrays). Returns (model, mean, std)."""
     allf = np.concatenate(feats)
     mean, std = allf.mean(axis=0), allf.std(axis=0)
@@ -95,11 +95,13 @@ def fit_mlp(feats, distances, seed):
         model.net[-1].weight.mul_(0.1)
         model.net[-1].bias.fill_(float(np.log(np.expm1(avg))))
     opt = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-    for _ in range(EPOCHS):
+    for step in range(EPOCHS):
         sums = torch.stack([model(x).sum() for x in xs])
         loss = trial_loss(sums, d)
         opt.zero_grad()
         loss.backward()
+        if on_update:                    # snapshots for animation/record_training.py
+            on_update(step, model, loss.item(), mean, std)
         opt.step()
     return model, mean, std
 
