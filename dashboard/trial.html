@@ -281,7 +281,10 @@ const CONFIG = {
   echoWindowS: 2,         // "echo %" next to the plot
   rawStaleMs: 2000,
   statusStaleMs: 12000,   // board status comes every 5 s
-  cmdTimeoutMs: 6000,     // no answer from the board in this long -> say so
+  cmdSlowMs: 6000,        // no answer yet: say the board is slow, keep waiting
+  cmdTimeoutMs: 30000,    // give up (and unlock the buttons) only after this long:
+                          // the public broker can take seconds each way, and unlocking
+                          // early let repeated presses reach the board late, in a burst
   minRateHz: 45,
 };
 const NAME_RE = /^[A-Za-z0-9-]{1,40}$/;
@@ -476,8 +479,12 @@ function render() {
   $("connText").textContent = ct;
 
   if (pending && now - pending.at > CONFIG.cmdTimeoutMs) {
-    setMsg(`No answer from the board to "${pending.cmd}". Is the board app running?`, "bad");
+    setMsg(`No answer from the board to "${pending.cmd}" in ${CONFIG.cmdTimeoutMs / 1000} s. ` +
+           "Check the board is running before pressing again.", "bad");
     pending = null;
+  } else if (pending && !pending.slow && now - pending.at > CONFIG.cmdSlowMs) {
+    pending.slow = true;
+    setMsg(`Sent ${pending.cmd}; the board is slow to answer (network), still waiting…`, "wait");
   }
 
   const state = trial ? trial.state : null;

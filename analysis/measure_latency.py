@@ -5,13 +5,12 @@ Listens to the board's MQTT topics (like the dashboard does):
   <prefix>/live   every 0.25 s: "new_steps" = board times of newly counted steps
 Each counted step is matched to the spike closest to its time (within
 --match-ms). Two delays per step:
-  count delay  wall clock: when the live message with the new count arrived,
-               minus when the spike happened. The spike's wall time is its raw
-               batch's arrival minus the batch's newest sample age, so the
-               network delay cancels out: this is what you'd see on the dashboard.
-  detect lag   board time: newest sample already processed when the step was
-               counted, minus the spike's sample time (the CNN's look-ahead
-               plus waiting for the next 0.25 s run)
+  detect lag   on the board: when the count changed minus when the spike
+               happened, both on the board's sample clock (the CNN's 1.2 s
+               look-ahead plus waiting for the next 0.25 s run)
+  network      the live message's arrival here minus its "wall" publish time
+               (needs the board's and this computer's clocks in sync: NTP)
+  count delay  the sum: what you see on the dashboard
 Spikes with no counted step (e.g. a stomp in place that the model doesn't take
 for a step) are listed too.
 
@@ -41,21 +40,19 @@ def main():
     args = ap.parse_args()
 
     lock = threading.Lock()
-    samples = []              # (board t, |a|, arrival wall estimate)
-    counted = []              # (board t of step, wall arrival, board t newest processed)
+    samples = []              # (board t, |a|)
+    counted = []              # (board t of step, network delay s, board t newest processed)
 
     def on_message(client, userdata, msg):
         now = time.time()
         data = json.loads(msg.payload)
         with lock:
             if msg.topic.endswith("/raw"):
-                newest = data[-1]["t"]
                 for s in data:
-                    a = math.sqrt(s["ax"] ** 2 + s["ay"] ** 2 + s["az"] ** 2)
-                    samples.append((s["t"], a, now - (newest - s["t"]) / 1000))
+                    samples.append((s["t"], math.sqrt(s["ax"] ** 2 + s["ay"] ** 2 + s["az"] ** 2)))
             else:
                 for t in data.get("new_steps", []):
-                    counted.append((t, now, data["t"]))
+                    counted.append((t, now - data["wall"], data["t"]))
 
     client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
     client.on_message = on_message
@@ -70,23 +67,23 @@ def main():
         raise SystemExit("no raw samples arrived: is the board (or simulator) running?")
     t = np.array([s[0] for s in samples], float)
     a = np.array([s[1] for s in samples])
-    wall = np.array([s[2] for s in samples])
     spikes = [i for i in range(1, len(a) - 1)
               if a[i] >= args.spike_g and a[i] >= a[i - 1] and a[i] > a[i + 1]]
     spikes = [i for k, i in enumerate(spikes) if k == 0 or t[i] - t[spikes[k - 1]] > 300]
     rows, used = [], set()
-    for st, arrived, newest in counted:
+    for st, network, newest in counted:
         if not len(spikes):
             break
         i = min(spikes, key=lambda j: abs(t[j] - st))
         if abs(t[i] - st) <= args.match_ms:
             used.add(i)
-            rows.append((st - t[i], (arrived - wall[i]) * 1000, newest - t[i]))
+            lag = newest - t[i]
+            rows.append((st - t[i], lag, network * 1000, lag + network * 1000))
     print(f"\n{len(counted)} steps counted, {len(spikes)} spikes >= {args.spike_g} g, {len(rows)} matched")
     if rows:
         r = np.array(rows)
-        for name, col in (("step time - spike time (ms)", 0), ("count delay, wall clock (ms)", 1),
-                          ("detect lag, board time (ms)", 2)):
+        for name, col in (("step time - spike time (ms)", 0), ("detect lag on the board (ms)", 1),
+                          ("network to here (ms)", 2), ("count delay, total (ms)", 3)):
             print(f"  {name:30s} median {np.median(r[:, col]):6.0f}   min {r[:, col].min():6.0f}   "
                   f"max {r[:, col].max():6.0f}")
     missed = [i for i in spikes if i not in used and t[i] < t[-1] - 2000]
