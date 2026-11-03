@@ -45,7 +45,7 @@ const uint32_t US_STATS_MS = 10000;            // how often to report ping stats
 // Gyro zero-rate bias of THIS board's MPU-6050, deg/s, in SENSOR axes (X, Y, Z
 // as printed on the board, before the remap). Measured at rest over 10 s on
 // 2026-10-23; the monitor showed body gx 1.46, gy -1.11, gz -0.07, which the
-// default remap maps back to sensor X 1.11, Y 1.46, Z -0.07. Re-measure if the
+// axis-swap remap used then maps back to sensor X 1.11, Y 1.46, Z -0.07. Re-measure if the
 // sensor board is swapped. No startup calibration on purpose: the wearer may be
 // moving when it boots.
 const float GYRO_BIAS_DPS[3] = {1.11f, 1.46f, -0.07f};
@@ -55,19 +55,29 @@ const float GYRO_BIAS_DPS[3] = {1.11f, 1.46f, -0.07f};
 //   x along the thigh toward the hip   (+1 g standing)
 //   y lateral, pointing to your right
 //   z out of the front of the thigh    (+1 g sitting, thigh horizontal)
-// body[i] = BODY_SIGN[i] * sensor[BODY_FROM[i]], sensor axes 0=X 1=Y 2=Z as
-// printed on the board. The same remap is applied to accel and gyro.
+// body = BODY_R * sensor, sensor axes X, Y, Z as printed on the board. Each row
+// of BODY_R is one body axis written in sensor axes. The same remap is applied
+// to accel and gyro.
 //
-// Current mounting (axis check 2026-10-23): board flat on the front of the
-// thigh, chip side facing out, with the board's +X arrow pointing DOWN toward
-// the knee. Then
-//   body x = -sensor X,  body y = -sensor Y,  body z = +sensor Z.
-// Expected with this remap: standing ax ~ +1, sitting az ~ +1, and gy goes
-// POSITIVE while sitting down (the thigh rotates about +y, to your right).
-// Keep the frame right-handed: if you flip one sign, also flip another or
-// swap two axes, otherwise the gyro signs won't match the accel.
-const uint8_t BODY_FROM[3] = {0, 1, 2};
-const int8_t  BODY_SIGN[3] = {-1, -1, +1};
+// Current mounting (final, measured from bench_04 on 2026-11-02): low on the
+// thigh just above the knee, board's +X arrow pointing roughly down, tilted
+// about 20 degrees from the thigh axis because the strap sits on the taper.
+//   x row = gravity while standing (mean of the 4 s before and after walking,
+//           which agree within 3 degrees)
+//   y row = main gyro axis while walking, made perpendicular to x, signed so
+//           the forward swing of the thigh is positive
+//   z row = x cross y
+// The previous axis-swap remap (x = -X, y = -Y, z = +Z) left the frame about
+// 20 degrees off: standing read ax 0.89, az -0.31 instead of ax ~1, az ~0.
+// Expected with this remap: standing ax ~ +1 (0.945 on this board, gain error)
+// with ay, az ~ 0, sitting az ~ +1, and gy POSITIVE as the thigh swings forward.
+// To redo it after moving the sensor: record a count trial with ~4 s of
+// standing at each end and recompute the three rows the same way.
+const float BODY_R[3][3] = {
+  {-0.938f,  0.078f, -0.337f},   // x: along the thigh, toward the hip
+  {-0.104f, -0.993f,  0.060f},   // y: lateral, to your right
+  {-0.330f,  0.091f,  0.939f},   // z: out of the front of the thigh
+};
 // =====================================================================================
 
 // ===================== HC-SR04 (non-blocking) =====================
@@ -230,7 +240,7 @@ bool readOnce(float acc[3], float gyr[3]) {
 
 void toBody(const float s[3], float b[3]) {
   for (int i = 0; i < 3; i++) {
-    b[i] = BODY_SIGN[i] * s[BODY_FROM[i]];
+    b[i] = BODY_R[i][0] * s[0] + BODY_R[i][1] * s[1] + BODY_R[i][2] * s[2];
   }
 }
 

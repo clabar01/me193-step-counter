@@ -13,8 +13,8 @@ _TBD_
 | Part | Notes |
 | --- | --- |
 | Arduino Uno Q ("AirFour") | Linux side runs Python, MCU side runs the sketch; they talk through Arduino_RouterBridge. |
-| MPU-6050 IMU (accel + gyro) | I2C 0x68, front of the mid-thigh. |
-| HC-SR04 ultrasonic sensor | From [me193-sumo](https://github.com/clabar01/me193-sumo). On the same thigh strap, pointing at the other thigh. |
+| MPU-6050 IMU (accel + gyro) | I2C 0x68, low on the thigh just above the knee. Axis remap measured from `bench_04` (`BODY_R` in the sketch). |
+| HC-SR04 ultrasonic sensor | From [me193-sumo](https://github.com/clabar01/me193-sumo). Just above the knee, horizontal with pins up, pointing at the other thigh. |
 | Power bank + fanny pack | Power and carry the Uno Q on the hip. |
 
 There are no foot sensors. Step labels come from trials where the steps are
@@ -79,7 +79,7 @@ This is a public broker: anyone can read these topics or send a trial command.
    The LED matrix shows the state: footprints = ready, blinking dot =
    recording, ? = waiting for your count, check = saved, X = command refused.
 4. `python board/pull_recordings.py` copies finished trials into `data/raw/`
-   (`BOARD=arduino@192.168.1.173` if `AirFour.local` doesn't resolve).
+   (`BOARD=arduino@<board IP>` if `AirFour.local` doesn't resolve).
 
 Each trial is `<session>_<trial>.csv` (`t_ms, ax, ay, az, gx, gy, gz, us_mm, us_hit`)
 plus `<session>_<trial>.json` (type, counted steps, distance, speed, phone steps,
