@@ -51,7 +51,7 @@ pip install -r requirements.txt
 | `data/raw/` | trial recordings pulled from the board (gitignored) |
 | `data/sim/` | FAKE trials from the simulator (gitignored): `raw/` + `truth/` from `scripts/make_sim_dataset.py`, for testing the pipeline only |
 | `data/processed/` | windowed / feature data |
-| `training/` | `simulator.py` (+ `sim_template.json`), `step_detector/` (CNN step counter: data, model, losses, training, tests) |
+| `training/` | `simulator.py` (+ `sim_template.json`), `step_detector/` (CNN step counter: data, model, losses, training, tests), `step_length/` (step-length MLP + baselines) |
 | `scripts/` | `make_sim_dataset.py` (fake dataset), `fit_sim_template.py` (simulator stride from real trials) |
 | `models/` | trained models: `step_detector/<sim or real>/` (weights `model.pt` stay local) |
 | `analysis/` | `plot_raw.py` (one trial), `plot_us_gyro.py` (gyro vs ultrasonic check); figures in `docs/figures/` |
@@ -136,6 +136,20 @@ set. The gyro detector alone is the baseline. Results, the model and
 normalization go to `models/step_detector/<sim|real>/` and figures to
 `docs/figures/step_detector/<sim|real>/`. How it works, in plain language:
 [docs/step_detector.md](docs/step_detector.md).
+
+### Step length
+
+```bash
+python training/step_length/train.py        # Session B distance trials in data/raw
+```
+
+Each distance trial is split into steps with the gyro stride detector, and
+each step gets five features (step time, thigh swing, accel range, closest
+ultrasonic, ultrasonic burst). A small MLP (5 -> 16 -> 16 -> 1) predicts each
+step's length and is trained only on whole-trial distances. It is compared,
+leave-one-trial-out, with a fixed step length, Weinberg and a pendulum model.
+Results and the model go to `models/step_length/real/`; explanation and the
+honest limits of 8 trials: [docs/step_length.md](docs/step_length.md).
 
 ## Results
 
