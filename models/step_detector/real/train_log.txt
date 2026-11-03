@@ -1,0 +1,140 @@
+data: data/raw; 21 trials, skipped 2 bench_*
+split by trial: train 14, val 7, test (session C) 0
+2 batches per epoch: warm start 45 epochs, fine-tune up to 1200, patience 300
+model: 17401 parameters, receptive field 121 samples (2.4 s), device mps
+  warm start 1/45: pseudo-label loss 0.669
+  warm start 2/45: pseudo-label loss 0.481
+  warm start 3/45: pseudo-label loss 0.468
+  warm start 4/45: pseudo-label loss 0.405
+  warm start 5/45: pseudo-label loss 0.395
+  warm start 6/45: pseudo-label loss 0.396
+  warm start 7/45: pseudo-label loss 0.375
+  warm start 8/45: pseudo-label loss 0.378
+  warm start 9/45: pseudo-label loss 0.378
+  warm start 10/45: pseudo-label loss 0.365
+  warm start 11/45: pseudo-label loss 0.366
+  warm start 12/45: pseudo-label loss 0.364
+  warm start 13/45: pseudo-label loss 0.357
+  warm start 14/45: pseudo-label loss 0.353
+  warm start 15/45: pseudo-label loss 0.357
+  warm start 16/45: pseudo-label loss 0.345
+  warm start 17/45: pseudo-label loss 0.351
+  warm start 18/45: pseudo-label loss 0.356
+  warm start 19/45: pseudo-label loss 0.353
+  warm start 20/45: pseudo-label loss 0.352
+  warm start 21/45: pseudo-label loss 0.343
+  warm start 22/45: pseudo-label loss 0.350
+  warm start 23/45: pseudo-label loss 0.349
+  warm start 24/45: pseudo-label loss 0.347
+  warm start 25/45: pseudo-label loss 0.345
+  warm start 26/45: pseudo-label loss 0.344
+  warm start 27/45: pseudo-label loss 0.342
+  warm start 28/45: pseudo-label loss 0.335
+  warm start 29/45: pseudo-label loss 0.341
+  warm start 30/45: pseudo-label loss 0.336
+  warm start 31/45: pseudo-label loss 0.335
+  warm start 32/45: pseudo-label loss 0.337
+  warm start 33/45: pseudo-label loss 0.329
+  warm start 34/45: pseudo-label loss 0.334
+  warm start 35/45: pseudo-label loss 0.331
+  warm start 36/45: pseudo-label loss 0.328
+  warm start 37/45: pseudo-label loss 0.331
+  warm start 38/45: pseudo-label loss 0.327
+  warm start 39/45: pseudo-label loss 0.328
+  warm start 40/45: pseudo-label loss 0.328
+  warm start 41/45: pseudo-label loss 0.329
+  warm start 42/45: pseudo-label loss 0.325
+  warm start 43/45: pseudo-label loss 0.325
+  warm start 44/45: pseudo-label loss 0.327
+  warm start 45/45: pseudo-label loss 0.326
+  fine-tune 1: train count loss 857.90, val error 2.00 steps (peaks), 20.17 (sum)
+  fine-tune 10: train count loss 7.64, val error 9.14 steps (peaks), 3.36 (sum)
+  fine-tune 20: train count loss 7.90, val error 8.86 steps (peaks), 4.40 (sum)
+  fine-tune 30: train count loss 7.59, val error 7.29 steps (peaks), 3.89 (sum)
+  fine-tune 40: train count loss 5.38, val error 6.43 steps (peaks), 3.65 (sum)
+  fine-tune 50: train count loss 7.97, val error 6.00 steps (peaks), 3.03 (sum)
+  fine-tune 60: train count loss 2.35, val error 5.29 steps (peaks), 2.85 (sum)
+  fine-tune 70: train count loss 3.45, val error 5.71 steps (peaks), 2.90 (sum)
+  fine-tune 80: train count loss 9.82, val error 5.43 steps (peaks), 2.77 (sum)
+  fine-tune 90: train count loss 4.12, val error 4.71 steps (peaks), 2.60 (sum)
+  fine-tune 100: train count loss 2.09, val error 3.57 steps (peaks), 2.04 (sum)
+  fine-tune 110: train count loss 2.27, val error 3.29 steps (peaks), 2.22 (sum)
+  fine-tune 120: train count loss 1.63, val error 3.14 steps (peaks), 1.78 (sum)
+  fine-tune 130: train count loss 1.48, val error 2.43 steps (peaks), 1.87 (sum)
+  fine-tune 140: train count loss 1.29, val error 2.29 steps (peaks), 1.19 (sum)
+  fine-tune 150: train count loss 1.16, val error 2.43 steps (peaks), 1.35 (sum)
+  fine-tune 160: train count loss 1.38, val error 2.29 steps (peaks), 1.40 (sum)
+  fine-tune 170: train count loss 3.43, val error 2.00 steps (peaks), 1.33 (sum)
+  fine-tune 180: train count loss 0.54, val error 2.14 steps (peaks), 1.29 (sum)
+  fine-tune 190: train count loss 0.56, val error 2.14 steps (peaks), 0.80 (sum)
+  fine-tune 200: train count loss 0.26, val error 2.14 steps (peaks), 1.93 (sum)
+  fine-tune 210: train count loss 1.30, val error 2.00 steps (peaks), 0.83 (sum)
+  fine-tune 220: train count loss 0.19, val error 2.14 steps (peaks), 1.74 (sum)
+  fine-tune 230: train count loss 1.31, val error 1.86 steps (peaks), 0.87 (sum)
+  fine-tune 240: train count loss 0.40, val error 2.00 steps (peaks), 1.06 (sum)
+  fine-tune 250: train count loss 0.24, val error 1.86 steps (peaks), 0.86 (sum)
+  fine-tune 260: train count loss 0.24, val error 1.86 steps (peaks), 1.47 (sum)
+  fine-tune 270: train count loss 0.16, val error 1.86 steps (peaks), 1.24 (sum)
+  fine-tune 280: train count loss 0.91, val error 1.71 steps (peaks), 0.85 (sum)
+  fine-tune 290: train count loss 0.32, val error 1.71 steps (peaks), 1.24 (sum)
+  fine-tune 300: train count loss 0.34, val error 1.71 steps (peaks), 1.43 (sum)
+  fine-tune 310: train count loss 0.22, val error 1.71 steps (peaks), 1.03 (sum)
+  fine-tune 320: train count loss 0.57, val error 1.71 steps (peaks), 0.85 (sum)
+  fine-tune 330: train count loss 0.39, val error 1.43 steps (peaks), 0.62 (sum)
+  fine-tune 340: train count loss 0.18, val error 1.43 steps (peaks), 0.75 (sum)
+  fine-tune 350: train count loss 0.18, val error 1.43 steps (peaks), 0.66 (sum)
+  fine-tune 360: train count loss 0.27, val error 1.29 steps (peaks), 0.77 (sum)
+  fine-tune 370: train count loss 0.78, val error 1.29 steps (peaks), 0.90 (sum)
+  fine-tune 380: train count loss 0.52, val error 1.29 steps (peaks), 1.12 (sum)
+  fine-tune 390: train count loss 0.18, val error 1.29 steps (peaks), 0.61 (sum)
+  fine-tune 400: train count loss 0.17, val error 1.29 steps (peaks), 0.76 (sum)
+  fine-tune 410: train count loss 0.59, val error 1.29 steps (peaks), 0.76 (sum)
+  fine-tune 420: train count loss 0.35, val error 1.29 steps (peaks), 0.67 (sum)
+  fine-tune 430: train count loss 0.08, val error 1.29 steps (peaks), 0.69 (sum)
+  fine-tune 440: train count loss 0.12, val error 1.14 steps (peaks), 0.93 (sum)
+  fine-tune 450: train count loss 0.26, val error 1.14 steps (peaks), 0.54 (sum)
+  fine-tune 460: train count loss 0.98, val error 1.14 steps (peaks), 0.44 (sum)
+  fine-tune 470: train count loss 0.10, val error 1.14 steps (peaks), 1.05 (sum)
+  fine-tune 480: train count loss 0.35, val error 1.14 steps (peaks), 1.29 (sum)
+  fine-tune 490: train count loss 0.12, val error 1.14 steps (peaks), 0.74 (sum)
+  fine-tune 500: train count loss 0.12, val error 1.14 steps (peaks), 0.87 (sum)
+  fine-tune 510: train count loss 0.24, val error 1.14 steps (peaks), 0.45 (sum)
+  fine-tune 520: train count loss 0.09, val error 1.14 steps (peaks), 0.57 (sum)
+  fine-tune 530: train count loss 0.11, val error 1.14 steps (peaks), 0.88 (sum)
+  fine-tune 540: train count loss 0.09, val error 1.14 steps (peaks), 0.52 (sum)
+  fine-tune 550: train count loss 0.17, val error 1.14 steps (peaks), 0.65 (sum)
+  fine-tune 560: train count loss 0.10, val error 1.14 steps (peaks), 0.68 (sum)
+  fine-tune 570: train count loss 0.23, val error 1.14 steps (peaks), 0.69 (sum)
+  fine-tune 580: train count loss 0.16, val error 1.14 steps (peaks), 0.58 (sum)
+  fine-tune 590: train count loss 0.19, val error 1.14 steps (peaks), 1.00 (sum)
+  fine-tune 600: train count loss 0.29, val error 1.14 steps (peaks), 0.52 (sum)
+  fine-tune 610: train count loss 0.05, val error 1.14 steps (peaks), 0.55 (sum)
+  fine-tune 620: train count loss 0.14, val error 1.14 steps (peaks), 0.83 (sum)
+  fine-tune 630: train count loss 0.23, val error 1.14 steps (peaks), 0.51 (sum)
+  fine-tune 640: train count loss 0.07, val error 1.14 steps (peaks), 0.62 (sum)
+  fine-tune 650: train count loss 0.11, val error 1.14 steps (peaks), 0.98 (sum)
+  fine-tune 660: train count loss 0.20, val error 1.14 steps (peaks), 0.47 (sum)
+  fine-tune 670: train count loss 0.06, val error 1.14 steps (peaks), 0.50 (sum)
+  fine-tune 680: train count loss 0.20, val error 1.14 steps (peaks), 1.03 (sum)
+  fine-tune 690: train count loss 0.31, val error 1.14 steps (peaks), 0.47 (sum)
+  fine-tune 700: train count loss 0.08, val error 1.14 steps (peaks), 0.49 (sum)
+  fine-tune 710: train count loss 0.27, val error 1.14 steps (peaks), 0.43 (sum)
+  fine-tune 720: train count loss 0.43, val error 1.14 steps (peaks), 1.05 (sum)
+  fine-tune 730: train count loss 0.20, val error 1.14 steps (peaks), 0.83 (sum)
+  fine-tune 740: train count loss 0.13, val error 1.14 steps (peaks), 0.51 (sum)
+  fine-tune 750: train count loss 0.49, val error 1.14 steps (peaks), 1.04 (sum)
+  fine-tune 760: train count loss 0.12, val error 1.14 steps (peaks), 1.09 (sum)
+  fine-tune 770: train count loss 0.10, val error 1.14 steps (peaks), 0.61 (sum)
+  fine-tune 780: train count loss 0.11, val error 1.14 steps (peaks), 0.55 (sum)
+  fine-tune 790: train count loss 0.62, val error 1.14 steps (peaks), 1.22 (sum)
+  fine-tune 800: train count loss 0.09, val error 1.14 steps (peaks), 0.82 (sum)
+  fine-tune 810: train count loss 0.08, val error 1.14 steps (peaks), 0.85 (sum)
+  fine-tune 820: train count loss 0.06, val error 1.14 steps (peaks), 0.69 (sum)
+  stopped at epoch 826: no better validation count for 300 epochs
+  kept epoch 526: val error 1.14 steps (peaks), 0.38 (sum)
+
+       trials  steps (counted)  gyro detector MAE  gyro detector total %  CNN peaks MAE  CNN peaks total %  CNN sum MAE  CNN sum total %
+train    14.0            301.0               0.43                    1.3           0.71               -3.3         0.18             -0.2
+val       7.0            180.0               0.29                    1.1           1.14               -3.3         0.38             -0.7
+
+saved models/step_detector/real/ (model.pt, norm.json, results.md/.csv, history.json) and docs/figures/step_detector/real/

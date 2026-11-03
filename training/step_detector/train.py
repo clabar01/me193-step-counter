@@ -22,6 +22,7 @@ figures in docs/figures/step_detector/<tag>/; <tag> is "sim" or "real".
 
 import argparse
 import json
+import math
 import random
 import sys
 from pathlib import Path
@@ -54,14 +55,14 @@ def pick_device(name):
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def split(trials, val_frac, seed):
+def split(trials, val_frac, seed, train_sessions=TRAIN_SESSIONS):
     """Whole trials only. Validation takes the same share of each kind of
     trial (session x speed, zero-step trials on their own) so it isn't, say,
     all jogging."""
     rng = random.Random(seed)
     groups = {}
     for tr in trials:
-        if tr.session in TRAIN_SESSIONS and tr.counted is not None:
+        if tr.session in train_sessions and tr.counted is not None:
             key = (tr.session, "zero" if tr.counted == 0 else tr.meta.get("speed"))
             groups.setdefault(key, []).append(tr)
     train, val = [], []
@@ -72,8 +73,8 @@ def split(trials, val_frac, seed):
         val += g[:n_val]
         train += g[n_val:]
     test = [tr for tr in trials if tr.session in TEST_SESSIONS]
-    ignored = [tr.name for tr in trials if tr.session not in TRAIN_SESSIONS + TEST_SESSIONS
-               or (tr.session in TRAIN_SESSIONS and tr.counted is None)]
+    ignored = [tr.name for tr in trials if tr.session not in tuple(train_sessions) + TEST_SESSIONS
+               or (tr.session in train_sessions and tr.counted is None)]
     return train, val, test, ignored
 
 
@@ -233,11 +234,17 @@ def main():
     ap.add_argument("--truth-dir", type=Path,
                     help="true step times (simulator only); default: ../truth next to --data-dir if it exists")
     ap.add_argument("--tag", help="name for the outputs (default: sim if --data-dir is under data/sim, else real)")
+    ap.add_argument("--train-sessions", default=",".join(TRAIN_SESSIONS),
+                    help="sessions for train/validation, comma-separated (case matters); C is always test only")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--val-frac", type=float, default=0.2)
-    ap.add_argument("--pretrain-epochs", type=int, default=15)
-    ap.add_argument("--epochs", type=int, default=400)
-    ap.add_argument("--patience", type=int, default=80)
+    # Training length is set in optimizer updates (batches), not epochs, so a
+    # small real dataset (2 batches per epoch) trains as long as the bigger
+    # simulated one (6 per epoch). Epochs = updates / batches per epoch.
+    ap.add_argument("--pretrain-updates", type=int, default=90, help="warm-start length")
+    ap.add_argument("--max-updates", type=int, default=2400, help="fine-tune length at most")
+    ap.add_argument("--patience-updates", type=int, default=600,
+                    help="stop fine-tuning after this long without a better validation count")
     ap.add_argument("--lr", type=float, default=3e-3, help="warm-start learning rate")
     ap.add_argument("--ft-lr", type=float, default=3e-4, help="fine-tune learning rate")
     ap.add_argument("--batch", type=int, default=8)
@@ -265,7 +272,7 @@ def main():
     device = pick_device(args.device)
 
     trials, skipped = load_trials(data_dir, truth_dir)
-    train_set, val, test, ignored = split(trials, args.val_frac, args.seed)
+    train_set, val, test, ignored = split(trials, args.val_frac, args.seed, args.train_sessions.split(","))
     log(f"data: {data_dir.relative_to(REPO) if data_dir.is_relative_to(REPO) else data_dir}"
         f"{'  (SIMULATED)' if is_sim else ''}; {len(trials)} trials, skipped {len(skipped)} bench_*"
         f"{', ignored ' + ', '.join(ignored) if ignored else ''}")
@@ -277,6 +284,13 @@ def main():
     despiked = sum(tr.despiked for tr in trials)
     if despiked:
         log(f"despiked {despiked} glitch samples")
+
+    per_epoch = math.ceil(len(train_set) / args.batch)
+    args.pretrain_epochs = math.ceil(args.pretrain_updates / per_epoch)
+    args.epochs = math.ceil(args.max_updates / per_epoch)
+    args.patience = math.ceil(args.patience_updates / per_epoch)
+    log(f"{per_epoch} batches per epoch: warm start {args.pretrain_epochs} epochs, fine-tune up to "
+        f"{args.epochs}, patience {args.patience}")
 
     mean, std = norm_stats(train_set)
     model = StepCNN(in_channels=len(CHANNELS)).to(device)
@@ -303,20 +317,24 @@ def main():
     (out / "results.md").write_text(
         f"# Step detector results ({tag})\n\nData: {source}, {data_dir.name}/. "
         f"Train {len(train_set)}, val {len(val)}, test {len(test)} trials. "
-        f"Kept epoch {history['best_epoch']}.\n\nMAE = mean absolute count error per trial vs counted_steps; "
+        f"Command: `{' '.join(['python training/step_detector/train.py'] + sys.argv[1:])}`. "
+        f"Kept epoch {history['best_epoch']} of up to {args.epochs}.\n\nMAE = mean absolute count error per trial vs counted_steps; "
         f"total % = summed count vs summed counted steps.\n\n"
         + markdown(table.reset_index(names="")) + "\n\n## Per trial\n\n" + markdown(df) + "\n")
 
     label = "SIMULATED data" if is_sim else "real data"
     loss_curves(history, figs / "loss_curves.png", f"Step detector training ({label})")
+    # a few held-out trials: one per speed plus the back-and-forth from the test
+    # set, or from validation while there is no session C yet
+    pool, which = (test, "test") if test else (val, "validation")
     show = []
     for speed in ("slow", "normal", "fast", "jog"):
-        show += [tr for tr in test if tr.meta.get("speed") == speed][:1]
-    show += [tr for tr in test if "back-and-forth" in (tr.meta.get("notes") or "")][:1]
+        show += [tr for tr in pool if tr.meta.get("speed") == speed and tr.counted][:1]
+    show += [tr for tr in pool if "back-and-forth" in (tr.meta.get("notes") or "")][:1]
     show += [tr for tr in val if tr.counted == 0][:1]
     if show:
-        trial_outputs([outputs[tr.name] for tr in show], figs / "test_trials.png",
-                      f"{label}; last block from validation")
+        trial_outputs([outputs[tr.name] for tr in show], figs / f"{which}_trials.png",
+                      f"{label}; {which} trials (last block: a zero-step validation trial)")
     log(f"\nsaved {out.relative_to(REPO)}/ (model.pt, norm.json, results.md/.csv, history.json) "
         f"and {figs.relative_to(REPO)}/")
     (out / "train_log.txt").write_text("\n".join(log_lines) + "\n")

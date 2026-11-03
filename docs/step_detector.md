@@ -207,12 +207,13 @@ data. See `models/step_detector/sim/results.md` for the full table.
 | Test set (session C, 9 trials, 446 steps) | Count error per trial | Total | Step timing F1 |
 | --- | --- | --- | --- |
 | gyro detector alone | 0.89 | −0.4% | 0.986 |
-| CNN, peak count | 0.89 | −1.8% | 0.983 |
-| CNN, sum | 1.26 | −1.6% | — |
+| CNN, peak count | 0.56 | −0.7% | 0.981 |
+| CNN, sum | 0.99 | −0.9% | — |
 
-- **On simulated walking the CNN only ties the gyro detector.** The
-  simulator's steps are tied exactly to the gyro waveform it plays back, so
-  the gyro detector is nearly perfect there and there is little to gain.
+- **On simulated walking the CNN is only slightly better than the gyro
+  detector.** The simulator's steps are tied exactly to the gyro waveform it
+  plays back, so the gyro detector is nearly perfect there and there is
+  little to gain.
 - **Where the CNN beat it was sitting down.** Both sit-down trials count 2
   "steps" for the gyro detector and 0 for the CNN, because the count loss saw
   counted_steps = 0.
@@ -220,8 +221,29 @@ data. See `models/step_detector/sim/results.md` for the full table.
   and the ultrasonic and accelerometer carry information the gyro detector
   ignores.
 
-To switch to real data, record sessions A, B and C with the Trial page,
-`python board/pull_recordings.py`, then run
-`python training/step_detector/train.py --data-dir data/raw`. Outputs then go
-to `models/step_detector/real/` and `docs/figures/step_detector/real/`, and
-the timing F1 is left out because there are no true step times.
+## 7. First real data (2026-11-03, no session C yet)
+
+```bash
+python training/step_detector/train.py --data-dir data/raw
+```
+
+There were 21 trials: A_01–A_13 (A_11–A_13 are standing, zero steps) and
+B_01–B_08 (tape-measured distances of 11, 19 and 30 m). They were split by whole trial into 14 for training and 7 for
+validation. There is no test set yet, so the validation trials also chose
+the kept epoch, which makes their numbers slightly optimistic. Session C stays
+the final test. Training length is set in updates, not epochs: 14 trials make
+only 2 batches per epoch, and at the simulated data's epoch counts the warm
+start was too short and fine-tuning stopped before it recovered.
+
+| Validation (7 trials, 180 steps) | Count error per trial | Total |
+| --- | --- | --- |
+| gyro detector alone | 0.29 | +1.1% |
+| CNN, peak count | 1.14 | −3.3% |
+| CNN, sum | 0.38 | −0.7% |
+
+The CNN's sum is close to the gyro detector. Its peak count is usually one low:
+it misses a weak first or last step. With 14 training trials, these
+differences of 1–2 steps are within noise. Full table:
+`models/step_detector/real/results.md`; plots:
+`docs/figures/step_detector/real/`. Timing F1 is left out because real
+trials have no true step times.

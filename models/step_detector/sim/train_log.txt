@@ -1,5 +1,6 @@
 data: data/sim/raw  (SIMULATED); 70 trials, skipped 0 bench_*
 split by trial: train 48, val 13, test (session C) 9
+6 batches per epoch: warm start 15 epochs, fine-tune up to 400, patience 100
 model: 17401 parameters, receptive field 121 samples (2.4 s), device mps
   warm start 1/15: pseudo-label loss 0.552
   warm start 2/15: pseudo-label loss 0.462
@@ -17,19 +18,55 @@ model: 17401 parameters, receptive field 121 samples (2.4 s), device mps
   warm start 14/15: pseudo-label loss 0.399
   warm start 15/15: pseudo-label loss 0.398
   fine-tune 1: train count loss 2382.20, val error 28.77 steps (peaks), 10.10 (sum)
+  fine-tune 10: train count loss 23.91, val error 31.38 steps (peaks), 4.67 (sum)
+  fine-tune 20: train count loss 22.49, val error 23.62 steps (peaks), 5.68 (sum)
+  fine-tune 30: train count loss 24.96, val error 16.62 steps (peaks), 4.11 (sum)
+  fine-tune 40: train count loss 18.16, val error 13.92 steps (peaks), 3.51 (sum)
+  fine-tune 50: train count loss 13.86, val error 10.69 steps (peaks), 4.42 (sum)
+  fine-tune 60: train count loss 14.75, val error 7.46 steps (peaks), 2.69 (sum)
+  fine-tune 70: train count loss 13.09, val error 6.00 steps (peaks), 2.83 (sum)
+  fine-tune 80: train count loss 5.57, val error 3.92 steps (peaks), 2.07 (sum)
+  fine-tune 90: train count loss 4.07, val error 3.15 steps (peaks), 2.39 (sum)
   fine-tune 100: train count loss 4.97, val error 2.38 steps (peaks), 1.32 (sum)
+  fine-tune 110: train count loss 2.67, val error 1.92 steps (peaks), 1.55 (sum)
+  fine-tune 120: train count loss 6.09, val error 1.38 steps (peaks), 1.76 (sum)
+  fine-tune 130: train count loss 1.87, val error 1.38 steps (peaks), 1.22 (sum)
+  fine-tune 140: train count loss 3.49, val error 1.69 steps (peaks), 2.05 (sum)
+  fine-tune 150: train count loss 2.10, val error 1.77 steps (peaks), 2.35 (sum)
+  fine-tune 160: train count loss 1.23, val error 0.92 steps (peaks), 0.74 (sum)
+  fine-tune 170: train count loss 0.88, val error 0.69 steps (peaks), 0.76 (sum)
+  fine-tune 180: train count loss 1.07, val error 0.62 steps (peaks), 0.73 (sum)
+  fine-tune 190: train count loss 1.65, val error 0.62 steps (peaks), 1.13 (sum)
   fine-tune 200: train count loss 0.45, val error 0.62 steps (peaks), 0.68 (sum)
+  fine-tune 210: train count loss 0.58, val error 0.62 steps (peaks), 0.93 (sum)
+  fine-tune 220: train count loss 0.54, val error 0.62 steps (peaks), 0.57 (sum)
+  fine-tune 230: train count loss 1.50, val error 0.54 steps (peaks), 0.85 (sum)
+  fine-tune 240: train count loss 0.91, val error 0.46 steps (peaks), 0.71 (sum)
+  fine-tune 250: train count loss 0.88, val error 0.46 steps (peaks), 0.82 (sum)
+  fine-tune 260: train count loss 0.33, val error 0.38 steps (peaks), 0.59 (sum)
+  fine-tune 270: train count loss 1.05, val error 0.31 steps (peaks), 1.11 (sum)
+  fine-tune 280: train count loss 0.41, val error 0.23 steps (peaks), 0.74 (sum)
+  fine-tune 290: train count loss 0.35, val error 0.38 steps (peaks), 0.65 (sum)
   fine-tune 300: train count loss 1.92, val error 0.38 steps (peaks), 0.96 (sum)
-  stopped at epoch 364: no better validation count for 80 epochs
-  kept epoch 284: val error 0.23 steps (peaks), 0.55 (sum)
+  fine-tune 310: train count loss 0.33, val error 0.31 steps (peaks), 0.57 (sum)
+  fine-tune 320: train count loss 0.45, val error 0.38 steps (peaks), 0.63 (sum)
+  fine-tune 330: train count loss 0.27, val error 0.38 steps (peaks), 0.70 (sum)
+  fine-tune 340: train count loss 0.35, val error 0.38 steps (peaks), 0.56 (sum)
+  fine-tune 350: train count loss 0.34, val error 0.31 steps (peaks), 0.52 (sum)
+  fine-tune 360: train count loss 0.25, val error 0.38 steps (peaks), 0.62 (sum)
+  fine-tune 370: train count loss 0.16, val error 0.31 steps (peaks), 0.63 (sum)
+  fine-tune 380: train count loss 0.44, val error 0.31 steps (peaks), 0.46 (sum)
+  fine-tune 390: train count loss 0.31, val error 0.31 steps (peaks), 0.54 (sum)
+  fine-tune 400: train count loss 0.37, val error 0.31 steps (peaks), 0.81 (sum)
+  kept epoch 386: val error 0.23 steps (peaks), 0.45 (sum)
 
               trials  steps (counted)  gyro detector MAE  gyro detector total %  CNN peaks MAE  CNN peaks total %  CNN sum MAE  CNN sum total %  CNN peaks MAE vs true  F1 CNN  F1 gyro
-train           48.0           1618.0               0.71                    0.6           0.60               -1.5         0.42             -0.7                   0.60   0.982    0.943
-val             13.0            450.0               0.62                    0.0           0.23               -0.2         0.55             -0.2                   0.15   0.987    0.987
-test             9.0            446.0               0.89                   -0.4           0.89               -1.8         1.26             -1.6                   1.00   0.983    0.986
-test: fast       2.0            102.0               1.00                    0.0           0.50               -1.0         1.96             -0.0                   1.00   0.990    0.995
-test: jog        2.0             94.0               1.00                   -2.1           0.50               -1.1         0.21              0.1                   0.50   0.993    0.988
-test: normal     3.0            163.0               1.00                   -0.6           1.00               -1.8         1.54             -2.8                   1.00   0.990    0.988
-test: slow       2.0             87.0               0.50                    1.1           1.50               -3.4         1.20             -2.8                   1.50   0.958    0.970
+train           48.0           1618.0               0.71                    0.6           0.48               -0.3         0.31              0.5                   0.44   0.981    0.943
+val             13.0            450.0               0.62                    0.0           0.23                0.2         0.45              0.4                   0.15   0.987    0.987
+test             9.0            446.0               0.89                   -0.4           0.56               -0.7         0.99             -0.9                   0.44   0.981    0.986
+test: fast       2.0            102.0               1.00                    0.0           0.50                1.0         1.62              0.8                   0.00   0.980    0.995
+test: jog        2.0             94.0               1.00                   -2.1           0.00                0.0         0.48             -0.4                   0.00   1.000    0.988
+test: normal     3.0            163.0               1.00                   -0.6           0.67               -1.2         1.19             -2.2                   0.67   0.988    0.988
+test: slow       2.0             87.0               0.50                    1.1           1.00               -2.3         0.57             -0.9                   1.00   0.952    0.970
 
 saved models/step_detector/sim/ (model.pt, norm.json, results.md/.csv, history.json) and docs/figures/step_detector/sim/

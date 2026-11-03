@@ -75,7 +75,7 @@ def trial_outputs(rows, path, title):
         near = trial.x[:, CHANNELS.index("us_hit")] == 1
         a2.scatter(t[near], us[near], s=6, color=SERIES_2)
         a2.set_ylim(0, US_CLIP_MM + 10)
-        style(a2, f"us_mm (<{US_CLIP_MM})")
+        style(a2, "us_mm")
 
         mass = step_mass(r["y"])
         a3.plot(t, mass, color=SERIES_1, linewidth=1.2)
@@ -86,7 +86,7 @@ def trial_outputs(rows, path, title):
                 a3.axvline(s / FS, color=GRID, linewidth=1, zorder=0)
         a3.axhline(PEAK_HEIGHT, color=MUTED, linewidth=0.8, linestyle=(0, (3, 3)))
         a3.set_ylim(-0.03, max(1.3, mass.max() * 1.05))
-        style(a3, "CNN step mass / 100 ms")
+        style(a3, "step mass")
         a3.set_xlabel("time (s)" + ("; gray lines = true steps (simulator)" if r["true"] is not None else ""),
                       color=MUTED)
         a3.legend(loc="upper right", frameon=False, labelcolor=MUTED, fontsize=8.5)
