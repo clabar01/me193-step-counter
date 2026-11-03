@@ -88,6 +88,13 @@ within 1 m (the other thigh was out of the beam), and then `us_mm = 1000`. The
 ultrasonic values in a row are from the ping fired right after the previous row
 (`us_lag_samples: 1`). `python analysis/plot_raw.py data/raw/<name>.csv` plots one.
 
+**For training:** the other thigh reads 16–100 mm. Echoes beyond about 150 mm
+are walls and furniture (e.g. a steady ~560 mm band in `A_01`) and depend on the
+room, so clip `us_mm` at 150 mm (or treat anything farther as no echo) before
+making features; never use the far readings themselves. Skip `bench_*` trials:
+they are hardware checks, and `bench_01`/`bench_04` predate the current axis
+remap.
+
 ### Simulator (no hardware)
 
 `training/simulator.py` makes **fake** thigh-IMU and ultrasonic data: the gyro
