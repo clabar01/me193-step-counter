@@ -247,3 +247,35 @@ differences of 1–2 steps are within noise. Full table:
 `models/step_detector/real/results.md`; plots:
 `docs/figures/step_detector/real/`. Timing F1 is left out because real
 trials have no true step times.
+
+## 8. Known limitation: turns and small-room walking
+
+All training data is straight hallway walking (sessions A and B). In a small
+room with turns, the detector misses about half the steps.
+
+`bench_05` (2026-11-03, 20 steps counted, small room with turns; a `bench`
+trial, so never used for training):
+
+| | Steps |
+| --- | --- |
+| counted by hand | 20 |
+| gyro stride detector | 22 |
+| CNN, offline | 10 |
+| CNN, live on the board (replayed) | 10 |
+
+![bench_05](figures/step_detector/real/bench_05_turning.png)
+
+- **The live code is not the cause.** The board's live code and the offline
+  model find exactly the same 10 steps.
+- **The walking looks different.** Turning twists the thigh along its length
+  (gyro x, up to ±250 deg/s), and the forward swing (gyro y) is weaker and
+  irregular instead of one clean +130 deg/s peak per stride.
+- **Only the straight stretches count.** The CNN counts steps on the short
+  straight stretches between turns (21.6–22.9 s, 25.5–26.8 s, 29.3–31.4 s)
+  and almost nothing through the turns. A lower threshold would recover only
+  one step: the largest missed bump is 0.46.
+
+**Fix (not done):** record count trials that include turns and room walking,
+keep some for validation, retrain, re-export (`scripts/export_models.py`) and
+redeploy. Session C and the demo use straight walks, where the detector was
+within 1–2 steps on validation.
