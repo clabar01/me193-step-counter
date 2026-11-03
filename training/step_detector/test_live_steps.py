@@ -3,9 +3,11 @@ offline PyTorch one, on the real trials in data/raw (skipped if there are none).
 
   1. numpy CNN == PyTorch CNN on a whole trial
   2. streaming a trial sample by sample, processing every 0.25 s like the
-     board, finds the same steps as the offline peak count (except within
-     ~1.3 s of the start and end, which live never finalizes)
+     board, finds the same steps as the offline counting rule
+     (counting.count_steps: CNN peaks + edge steps), except near the start
+     and end, which live never finalizes / never closes the last bout of
   3. numpy step-length MLP == PyTorch MLP
+  4. the board's numpy gyro stride detector == strides.step_times (scipy)
 
 Run: python training/step_detector/test_live_steps.py   (after scripts/export_models.py)
 """
@@ -21,9 +23,10 @@ HERE = Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(REPO / "board" / "python"))
-from counting import peak_steps  # noqa: E402
+from counting import END_WINDOW, EDGE_GAP_S, FS, count_steps  # noqa: E402
 from data import load_trials  # noqa: E402
-from live_steps import FINAL_LAG, LiveSteps, StepLengthMLP  # noqa: E402
+from live_steps import FINAL_LAG, LiveSteps, StepLengthMLP, gyro_step_times  # noqa: E402
+from strides import step_times  # noqa: E402
 from model import StepCNN  # noqa: E402
 
 RAW = REPO / "data" / "raw"
@@ -52,7 +55,7 @@ def test_streaming_finds_the_offline_steps(trials, live):
     for tr in trials:
         z = ((tr.x - live.cnn.mean) / live.cnn.std).T.astype(np.float32)
         with torch.no_grad():
-            offline = peak_steps(m(torch.from_numpy(z[None]))[0].numpy())
+            offline = count_steps(m(torch.from_numpy(z[None]))[0].numpy(), tr.gy)
         df = pd.read_csv(RAW / tr.meta["csv"])
         lv = LiveSteps(APP_MODELS)
         found = []
@@ -61,13 +64,15 @@ def test_streaming_finds_the_offline_steps(trials, live):
             lv.add(row)
             if i % 12 == 11 or i == len(df) - 1:          # ~every 0.25 s
                 found += [s["t"] for s in lv.process()["steps"]]
-        found = np.searchsorted(df["t_ms"].to_numpy(), found)
-        inner = offline[(offline >= FINAL_LAG + 8) & (offline < len(df) - FINAL_LAG - 8)]
+        found = np.sort(np.searchsorted(df["t_ms"].to_numpy(), found))
+        lo, hi = FINAL_LAG + 8, len(df) - FINAL_LAG - 8 - int(EDGE_GAP_S * FS) - END_WINDOW[1]
+        inner = offline[(offline >= lo) & (offline < hi)]
+        found = found[(found >= lo) & (found < hi)]
         assert len(found) == len(inner), (tr.name, len(found), len(inner))
         assert not len(found) or np.abs(found - inner).max() <= 1, tr.name
-        total_off += len(offline)
+        total_off += len(inner)
         total_live += len(found)
-    print(f"    {len(trials)} trials: live {total_live} steps = offline {total_off} minus edge steps")
+    print(f"    {len(trials)} trials: live {total_live} steps = offline {total_off} (away from the trial ends)")
 
 
 def test_numpy_mlp_matches_torch():
@@ -85,6 +90,16 @@ def test_numpy_mlp_matches_torch():
         assert abs(nm(f) - ref) < 1e-5
 
 
+def test_numpy_gyro_detector_matches_scipy(trials):
+    rng = np.random.default_rng(0)
+    for tr in trials:
+        assert np.array_equal(gyro_step_times(tr.gy), step_times(tr.gy)), tr.name
+        for _ in range(20):                     # windows like the edge check's
+            a = int(rng.integers(0, max(1, len(tr.gy) - 250)))
+            w = tr.gy[a:a + int(rng.integers(3, 250))]
+            assert np.array_equal(gyro_step_times(w), step_times(w)), (tr.name, a)
+
+
 if __name__ == "__main__":
     if not any(RAW.glob("*.json")):
         print("no real trials in data/raw: skipped")
@@ -97,3 +112,5 @@ if __name__ == "__main__":
     print("ok  test_streaming_finds_the_offline_steps")
     test_numpy_mlp_matches_torch()
     print("ok  test_numpy_mlp_matches_torch")
+    test_numpy_gyro_detector_matches_scipy(trials)
+    print("ok  test_numpy_gyro_detector_matches_scipy")

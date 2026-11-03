@@ -54,7 +54,7 @@ pip install -r requirements.txt
 | `training/` | `simulator.py` (+ `sim_template.json`), `step_detector/` (CNN step counter: data, model, losses, training, tests), `step_length/` (step-length MLP + baselines) |
 | `scripts/` | `make_sim_dataset.py` (fake dataset), `fit_sim_template.py` (simulator stride from real trials) |
 | `models/` | trained models: `step_detector/<sim or real>/` (weights `model.pt` stay local) |
-| `analysis/` | `evaluate.py` (uncertainty analysis -> `results.md`), `plot_raw.py` (one trial), `plot_us_gyro.py` (gyro vs ultrasonic check), `measure_latency.py`; figures in `docs/figures/` |
+| `analysis/` | `evaluate.py` (uncertainty analysis -> `results.md`), `counting_rule.py` (chooses the CNN's counting rule on the training trials -> `counting_rule.md`), `plot_raw.py` (one trial), `plot_us_gyro.py` (gyro vs ultrasonic check), `measure_latency.py`; figures in `docs/figures/` |
 | `dashboard/` | `dashboard.html` (live step counter, distance, cadence, step-detector plot, avatar) and `trial.html` (record trials): `python dashboard/serve.py` |
 | `animation/` | `explainer.html` (animated 7-scene explainer from real data in `data/story.json`, made by `record_training.py`), 3D avatar (`avatar.glb`) and `shrink_glb.py` |
 | `docs/` | write-up, [`step_detector.md`](docs/step_detector.md) (how the CNN works), figures |
@@ -167,7 +167,11 @@ The board runs both models with numpy (`board/python/live_steps.py`, no
 PyTorch). Every 0.25 s the step detector runs on the last 6 s. A sample's output
 only counts once the CNN has seen 1.2 s after it, and each sample is decided
 once, so overlapping windows never count a step twice; steps therefore appear
-about 1.3-1.5 s after they happen. Each step's length is computed when the next
+about 1.3-1.5 s after they happen. The CNN nearly always misses the last step
+of a walk, so the gyro stride detector checks each walk's start (at its 2nd
+step) and end (after 1.5 s without a step) and adds a step the CNN missed there
+(`counting.count_steps`, chosen by `analysis/counting_rule.py`). The end-of-walk
+step is counted ~1.5 s later than the others. Each step's length is computed when the next
 step arrives (it needs the step time). `training/step_detector/test_live_steps.py`
 checks the live pipeline finds the same steps as the offline one on the real trials.
 

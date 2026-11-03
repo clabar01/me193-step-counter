@@ -16,11 +16,18 @@ training (training/step_detector/, training/step_length/):
        sample is finalized exactly once, so overlapping windows never count a
        step twice.
     4. a finalized sample is a step if its mass is >= 0.5, it is the largest
-       within +-0.25 s, and the last step was >= 0.25 s earlier (the same rule
-       as training/step_detector/counting.py)
-    5. a step's length is computed when the NEXT step arrives (its features
-       need the step time), or after STEP_TIMEOUT_S if none does (the last step
-       of a walk uses the previous step time, as in training)
+       within +-0.25 s, and the last step was >= 0.25 s earlier (counting.py's
+       peaks)
+    5. edge steps (counting.py's count_steps, chosen in analysis/counting_rule.py):
+       the CNN nearly always misses the last step of a walk. Once a walking
+       bout is over (no step for EDGE_GAP_S), and once its 2nd step is known,
+       the gyro stride detector (a numpy copy of strides.py) runs on a window
+       of gy around the bout's last / first step; if it has a step 0.5-1.5 step
+       intervals beyond it, that step is added. The end-of-walk step is
+       counted ~1.5 s after the last CNN step.
+    6. a step's length is computed when the NEXT step arrives (its features
+       need the step time), or once nothing follows for STEP_TIMEOUT_S (the
+       last step of a walk uses the previous step time, as in training)
 
 So a step is counted ~1.3-1.5 s after it happens: the CNN needs 1.2 s of
 "future" around each sample, plus up to 0.25 s until the next processing run.
@@ -42,6 +49,13 @@ PEAK_HEIGHT = 0.5
 MIN_GAP = 13                 # samples between steps (0.25 s)
 FINAL_LAG = RF_HALF + 2 + MASS_K // 2 + 1   # newest sample index - this = newest final mass
 STEP_TIMEOUT_S = 1.5         # no next step this long -> finish the last step's length
+# Edge steps: the same constants as training/step_detector/counting.py
+EDGE_GAP = 75                # samples (1.5 s) without a step end a walking bout
+START_WINDOW = (-150, 70)    # gy window around a bout's first / last step, samples
+END_WINDOW = (-150, 100)
+END_GAP_STEPS = 6
+LONE_GAP = 30
+HISTORY = 500                # IMU samples kept for the edge check (10 s)
 CADENCE_STEPS = 6            # cadence from the median of the last this-many step intervals
 CADENCE_IDLE_S = 2.0         # no step this long -> cadence 0
 AXES = 6
@@ -61,6 +75,76 @@ def despike(x):
     bad = np.flatnonzero((far & agree).any(axis=1)) + 1
     x[bad] = (x[bad - 1] + x[bad + 1]) / 2
     return x
+
+
+# ---- gyro stride detector: numpy copy of training/step_detector/strides.py ----
+SWING_MIN_DPS = 60
+MOVING_DPS = 20
+PERIOD_RANGE_S = (0.5, 2.5)
+
+
+def find_peaks(x, height, distance):
+    """scipy.signal.find_peaks(x, height=height, distance=distance)[0], in numpy:
+    local maxima (a flat top counts once, at its middle), >= height, then the
+    tallest first, dropping lower peaks closer than distance."""
+    x = np.asarray(x, dtype=float)
+    peaks, i, i_max = [], 1, len(x) - 1
+    while i < i_max:
+        if x[i - 1] < x[i]:
+            ahead = i + 1
+            while ahead < i_max and x[ahead] == x[i]:
+                ahead += 1
+            if x[ahead] < x[i]:
+                peaks.append((i + ahead - 1) // 2)
+                i = ahead
+        i += 1
+    peaks = np.array(peaks, dtype=int)
+    peaks = peaks[x[peaks] >= height] if len(peaks) else peaks
+    if len(peaks) < 2 or distance <= 1:
+        return peaks
+    keep = np.ones(len(peaks), dtype=bool)
+    for j in np.argsort(x[peaks])[::-1]:
+        if not keep[j]:
+            continue
+        k = j - 1
+        while k >= 0 and peaks[j] - peaks[k] < distance:
+            keep[k] = False
+            k -= 1
+        k = j + 1
+        while k < len(peaks) and peaks[k] - peaks[j] < distance:
+            keep[k] = False
+            k += 1
+    return peaks[keep]
+
+
+def stride_period(gy):
+    moving = np.abs(gy) > MOVING_DPS
+    if moving.sum() < 2 * FS:
+        return None
+    w = np.where(moving, gy, 0.0)
+    w = w - w[moving].mean() * moving
+    ac = np.correlate(w, w, "full")[len(w) - 1:]
+    lo, hi = int(PERIOD_RANGE_S[0] * FS), min(int(PERIOD_RANGE_S[1] * FS), len(ac) - 1)
+    if hi <= lo:
+        return None
+    return lo + int(np.argmax(ac[lo:hi]))
+
+
+def gyro_step_times(gy):
+    """strides.step_times: the steps the gyro detector implies (2 per stride)."""
+    gy = np.asarray(gy, dtype=float)
+    period = stride_period(gy)
+    peaks = find_peaks(gy, SWING_MIN_DPS, int(0.6 * period) if period else int(0.4 * FS))
+    if len(peaks):
+        peaks = peaks[gy[peaks] >= 0.5 * np.median(gy[peaks])]
+    steps = []
+    for i, p in enumerate(peaks):
+        local = (peaks[i + 1] - p) if i + 1 < len(peaks) else (p - peaks[i - 1]) if i else (period or FS)
+        after = gy[p:p + int(0.6 * local)]
+        down = np.flatnonzero((after[:-1] > 0) & (after[1:] <= 0))
+        hs = p + (down[0] + 1 if len(down) else int(0.23 * local))
+        steps += [hs, hs + local // 2]
+    return np.array([s for s in steps if s < len(gy)], dtype=int)
 
 
 def longest_run(mask):
@@ -126,6 +210,9 @@ class LiveSteps:
         self.decided_upto = -1
         self.step_idx = []                             # recent step indices (for cadence / stride)
         self.pending = None                            # (index, t) of the step waiting for its length
+        self.imu = collections.deque(maxlen=HISTORY)   # (index, t, ax..gz) for the edge check
+        self.bout = []                                 # CNN steps of the current walking bout
+        self.bout_open = False
         self.reset()
 
     def reset(self):
@@ -137,6 +224,7 @@ class LiveSteps:
     def add(self, s):
         self.buf.append((self.n, s["t"], s["ax"], s["ay"], s["az"], s["gx"], s["gy"], s["gz"],
                          s["us_mm"], s["us_hit"]))
+        self.imu.append((self.n, s["t"], s["ax"], s["ay"], s["az"], s["gx"], s["gy"], s["gz"]))
         self.n += 1
 
     def _inputs(self, arr):
@@ -172,44 +260,98 @@ class LiveSteps:
         # decide each sample once its +-PEAK_HALF neighbours are final
         for j in range(self.decided_upto + 1, self.final_upto - PEAK_HALF + 1):
             m = self.mass.get(j, 0.0)
-            if m >= PEAK_HEIGHT and (not self.step_idx or j - self.step_idx[-1] >= MIN_GAP):
+            if m >= PEAK_HEIGHT and (not self.step_idx or j - self._last_cnn() >= MIN_GAP):
                 left = max((self.mass.get(i, 0.0) for i in range(j - PEAK_HALF, j)), default=0.0)
                 right = max(self.mass.get(i, 0.0) for i in range(j + 1, j + PEAK_HALF + 1))
                 if m > left and m >= right:
-                    self._on_step(j, int(ts[j - first]), arr, x, first, out)
+                    self._on_cnn_step(j, arr, x, first, out)
             self.decided_upto = j
+            if self.bout_open and j >= self.bout[-1] + EDGE_GAP - 1:
+                self._close_bout(arr, x, first, out)
         for i in [i for i in self.mass if i < self.decided_upto - 2 * PEAK_HALF]:
             del self.mass[i]
 
         # the last step of a walk: no next step within STEP_TIMEOUT_S
-        if self.pending and self.final_upto - self.pending[0] > STEP_TIMEOUT_S * FS:
+        if self.pending and self.decided_upto - self.pending[0] >= STEP_TIMEOUT_S * FS - 1:
             s = self.pending[0]
             prev = [p for p in self.step_idx if p < s]
             nxt = s + (s - prev[-1] if prev and s - prev[-1] < STEP_TIMEOUT_S * FS else self._stride() // 2)
             self._finish(s, nxt, arr, x, first, out)
         return out
 
+    # ---- edge steps (counting.count_steps) ----
+    def _last_cnn(self):
+        return self.bout[-1] if self.bout else -10 ** 9
+
+    def _on_cnn_step(self, j, arr, x, first, out):
+        if self.bout_open and j - self.bout[-1] < EDGE_GAP:
+            self.bout.append(j)
+        else:
+            self.bout, self.bout_open = [j], True
+        if len(self.bout) == 2:
+            self._edge(self.bout[0], self.bout[1] - self.bout[0], "start", arr, x, first, out)
+        self._on_step(j, arr, x, first, out)
+
+    def _close_bout(self, arr, x, first, out):
+        b = self.bout
+        if len(b) == 1:
+            self._edge(b[0], LONE_GAP, "start", arr, x, first, out)
+        gap = float(np.median(np.diff(b[-(END_GAP_STEPS + 1):]))) if len(b) > 1 else LONE_GAP
+        self._edge(b[-1], gap, "end", arr, x, first, out)
+        self.bout_open = False
+
+    def _edge(self, step, gap, side, arr, x, first, out):
+        """Add the gyro detector's step 0.5-1.5 intervals beyond `step`, if there is one."""
+        lo, hi = START_WINDOW if side == "start" else END_WINDOW
+        rows = np.array(self.imu, dtype=float)
+        start = int(rows[0, 0])
+        a, b = max(0, step + lo), min(self.n, step + hi)
+        a0, b0 = max(a - 1, start), min(b + 1, start + len(rows))        # one more each side for despike
+        if b - a < 3 or a0 > a:
+            return None
+        gy = despike(rows[a0 - start:b0 - start, 2:8])[a - a0:a - a0 + (b - a), 4]
+        sign = -1 if side == "start" else 1
+        cands = [int(g) + a for g in gyro_step_times(gy) if 0.5 * gap <= sign * (int(g) + a - step) <= 1.5 * gap]
+        if not cands:
+            return None
+        e = min(cands, key=lambda g: abs(sign * (g - step) - gap))
+        if any(abs(e - k) < MIN_GAP for k in self.step_idx):        # already counted (counting.edge_steps)
+            return None
+        t = int(rows[e - start, 1])
+        if side == "end":
+            self._on_step(e, arr, x, first, out, t=t)
+        else:                                # before the bout's first step: its length now, up to that step
+            self._count(e, t, out)
+            self._finish(e, step, arr, x, first, out, pending=False)
+        return e
+
     def _stride(self):
         recent = np.diff(self.step_idx[-(CADENCE_STEPS + 1):])
         recent = recent[recent < STEP_TIMEOUT_S * FS]
         return int(2 * np.median(recent)) if len(recent) else 60
 
-    def _on_step(self, j, t, arr, x, first, out):
-        self.step_idx = (self.step_idx + [j])[-20:]
+    def _count(self, j, t, out):
+        self.step_idx = sorted(self.step_idx + [j])[-20:]
         self.steps += 1
         out["steps"].append({"t": t, "n": self.steps})
+
+    def _on_step(self, j, arr, x, first, out, t=None):
+        t = int(arr[j - first, 1]) if t is None else t
+        self._count(j, t, out)
         if self.pending:
             self._finish(self.pending[0], j, arr, x, first, out)
         self.pending = (j, t)
 
-    def _finish(self, s, nxt, arr, x, first, out):
+    def _finish(self, s, nxt, arr, x, first, out, pending=True):
         """Step length for the step at index s, given the next step's index."""
-        f = self.step_features(x, s - first, nxt - first, self._stride())
+        i = max(s - first, 0)
+        f = self.step_features(x, i, max(nxt - first, i + 1), self._stride())
         length = self.mlp(f)
         self.distance_m += length
         self.last_length = length
-        out["lengths"].append({"t": int(arr[s - first, 1]), "length_m": round(length, 3)})
-        self.pending = None
+        out["lengths"].append({"t": int(arr[i, 1]), "length_m": round(length, 3)})
+        if pending:
+            self.pending = None
 
     @staticmethod
     def step_features(x, s, nxt, stride):

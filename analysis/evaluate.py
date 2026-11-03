@@ -7,7 +7,9 @@ Writes analysis/results.md (plain language, with the numbers) and figures in
 docs/figures/evaluation/<val|C>/.
 
 1. Step count: per test trial, counted vs predicted by the CNN (committed
-   real-data model) and by the gyro stride detector; mean absolute error, SD,
+   real-data model, counted with counting.count_steps: peaks + gyro-checked
+   edge steps, chosen on the training trials by analysis/counting_rule.py; the
+   old peaks-only rule is shown for reference) and by the gyro stride detector; mean absolute error, SD,
    bias and 95% bootstrap confidence intervals, overall and by speed; a
    predicted-vs-counted scatter.
 2. Distance: % error per distance trial for the step-length MLP and the
@@ -47,7 +49,7 @@ DET_DIR = REPO / "training" / "step_detector"
 LEN_DIR = REPO / "training" / "step_length"
 sys.path.insert(0, str(DET_DIR))
 import train as det  # noqa: E402
-from counting import peak_steps, sum_count  # noqa: E402
+from counting import count_steps, peak_steps, sum_count  # noqa: E402
 from data import CHANNELS, US_CLIP_MM, load_trials, preprocess  # noqa: E402
 from model import StepCNN  # noqa: E402
 from strides import step_times  # noqa: E402
@@ -156,7 +158,8 @@ def step_table(test, model, mean, std):
     for tr in test:
         y = cnn_output(model, mean, std, tr.x)
         rows.append({"trial": tr.name, "speed": tr.meta.get("speed"), "counted": tr.counted,
-                     "cnn": len(peak_steps(y)), "cnn_sum": round(sum_count(y), 1), "gyro": len(step_times(tr.gy))})
+                     "cnn": len(count_steps(y, tr.gy)), "cnn_peaks": len(peak_steps(y)),
+                     "cnn_sum": round(sum_count(y), 1), "gyro": len(step_times(tr.gy))})
     df = pd.DataFrame(rows)
     df["group"] = df.apply(group, axis=1)
     return df
@@ -201,7 +204,8 @@ def step_scatter(df, path, title):
 
 # ---------------- 2. distance ----------------
 def cnn_steps(model, mean, std, x):
-    return peak_steps(cnn_output(model, mean, std, x))
+    """The board's steps: the counting rule on the CNN output."""
+    return count_steps(cnn_output(model, mean, std, x), x[:, CHANNELS.index("gy")])
 
 
 def fit_length_models(train_items, cols, seed=0):
@@ -375,7 +379,7 @@ def main():
 
     # 1. step count
     steps = step_table(test, model, mean, std)
-    methods = [("cnn", "CNN"), ("gyro", "gyro detector")]
+    methods = [("cnn", "CNN"), ("cnn_peaks", "CNN, old rule (peaks only)"), ("gyro", "gyro detector")]
     step_sum = step_summary(steps, methods)
     step_scatter(steps, FIG / "step_scatter.png", f"Predicted vs counted steps ({len(steps)} {args.test} trials)")
     log(step_sum[step_sum["speed"] == "all"].to_string(index=False))
@@ -455,18 +459,25 @@ def main():
            f"(95% CI {sa.loc['CNN', '95% CI']}), and the gyro stride detector by "
            f"**{sa.loc['gyro detector', 'mean abs error (steps)']:.2f}** (95% CI {sa.loc['gyro detector', '95% CI']}). "
            f"Bias (average of predicted − counted): CNN {sa.loc['CNN', 'bias (steps)']:+.2f} steps, gyro "
-           f"{sa.loc['gyro detector', 'bias (steps)']:+.2f}. A negative bias means steps are missed; the CNN tends to "
-           "miss a weak first or last step of a walk.\n",
-           f"The plain sum of the CNN's output (what the count loss trains) is off by "
-           f"{np.abs(steps['cnn_sum'] - steps['counted']).mean():.2f} steps per trial: the network gets the total "
-           "about right, but a weak step's bump doesn't always reach the 0.5 needed to be counted as a peak. "
-           + ("On these straight walks the plain gyro detector counts more accurately than the CNN; the CNN's "
-              "advantage is ignoring non-steps (it counts sitting down as 0, where the gyro detector counts a stride).\n"
-              if sa.loc['gyro detector', 'mean abs error (steps)'] < sa.loc['CNN', 'mean abs error (steps)'] else
-              "The CNN counts more accurately than the gyro detector on these walks.\n"),
-           "Per trial:\n", md(steps[["trial", "speed", "counted", "cnn", "cnn_sum", "gyro"]
+           f"{sa.loc['gyro detector', 'bias (steps)']:+.2f}. A negative bias means steps are missed.\n",
+           "The CNN's steps are counted with the rule chosen on the training trials only "
+           "(`analysis/counting_rule.md`). It counts the peaks of the CNN output, plus one step at the start or "
+           "end of a walk when the gyro stride detector has a step there that the CNN missed. The CNN nearly "
+           "always misses the last step of a walk: its output there is ~0, not a weak peak. With the old "
+           f"peaks-only rule the CNN was off by {sa.loc['CNN, old rule (peaks only)', 'mean abs error (steps)']:.2f} "
+           f"steps per trial (bias {sa.loc['CNN, old rule (peaks only)', 'bias (steps)']:+.2f}). The plain sum of its "
+           f"output (what the count loss trains) is off by {np.abs(steps['cnn_sum'] - steps['counted']).mean():.2f}.\n",
+           ({-1: "On these straight walks the plain gyro detector counts more accurately than the CNN. ",
+             0: "On these straight walks the CNN and the plain gyro detector count equally well. ",
+             1: "The CNN counts more accurately than the gyro detector on these walks. "}[
+               int(np.sign(round(sa.loc['gyro detector', 'mean abs error (steps)'], 6)
+                           - round(sa.loc['CNN', 'mean abs error (steps)'], 6)))]
+            + "The agreement is partly by construction: the edge steps come from the gyro detector. The CNN still "
+              "decides every step inside a walk and whether there is a walk at all (it counts sitting down as 0, "
+              "where the gyro detector counts a stride).\n"),
+           "Per trial:\n", md(steps[["trial", "speed", "counted", "cnn", "cnn_peaks", "cnn_sum", "gyro"]
                                     + (["cnn_imu_only"] if "cnn_imu_only" in steps else [])].rename(columns={
-               "cnn": "CNN", "cnn_sum": "CNN sum of output", "gyro": "gyro detector",
+               "cnn": "CNN", "cnn_peaks": "CNN, old rule", "cnn_sum": "CNN sum of output", "gyro": "gyro detector",
                "cnn_imu_only": "CNN, IMU only (ablation)"})),
            "\nBy speed:\n", md(step_sum),
            f"\n![predicted vs counted](../docs/figures/evaluation/{args.test}/step_scatter.png)\n"]

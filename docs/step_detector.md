@@ -91,6 +91,12 @@ The peaks are counted on the 100 ms sum, not on single samples. The model
 places a step to within a sample or two, so a step's mass is usually spread
 over 3–5 samples, each below 0.5. Their sum is about 1.
 
+- **the counting rule** (`counting.count_steps`, used by the evaluation and
+  the board): the peak count, plus an **edge step** at the start or end of each
+  walking bout when the gyro stride detector has a step there that the CNN
+  missed (0.5–1.5 step intervals beyond the bout's first or last step; a bout
+  ends after 1.5 s without a step). See section 7.
+
 ## 3. The count loss
 
 [`losses.py`](../training/step_detector/losses.py). For each trial:
@@ -241,9 +247,45 @@ start was too short and fine-tuning stopped before it recovered.
 | CNN, peak count | 1.14 | −3.3% |
 | CNN, sum | 0.38 | −0.7% |
 
-The CNN's sum is close to the gyro detector. Its peak count is usually one low:
-it misses a weak first or last step. With 14 training trials, these
-differences of 1–2 steps are within noise. Full table:
+The CNN's sum is close to the gyro detector. Its peak count is usually one low.
+
+### Fixing the counting rule (2026-11-02)
+
+The missing step is nearly always the **last step of a walk**. The CNN's
+output there is about 0, not a weak peak, so a lower threshold can't recover
+it. Three rules were compared using only the 14 training trials
+(`python analysis/counting_rule.py` -> `analysis/counting_rule.md`): (a) a
+lower peak threshold, (b) round(sum), (c) peaks plus an edge step. Scoring them
+on the committed model's own training trials would favor (b): the count loss
+fitted sum = counted on exactly those trials. So the CNN was retrained 14 times
+(7 folds x 2 seeds), each time without 2 training trials, and the rules were
+scored on the trials each model hadn't seen:
+
+| Held-out training trials (28 predictions) | Count error per trial |
+| --- | --- |
+| (a) peaks >= 0.5 (old rule) | 1.50 |
+| (a) best lower threshold (0.3) | 1.39 |
+| (b) round(sum) | 4.29 |
+| (c) +1 at every bout end | 1.07 |
+| (c) gyro-checked edge steps, windowed (**chosen**) | 0.96 |
+
+The windowed form runs the gyro detector only on a few seconds of `gy` around
+each bout edge, so the board computes exactly the same thing (a whole-trial
+version scored 0.93 but can't run live). Edge steps closer than 0.25 s to a
+step already counted aren't added again. Without that check, a walk split in two
+by missed steps counted the same step twice. Then, on the validation trials:
+
+| Validation (7 trials, 180 steps) | Count error per trial | Total |
+| --- | --- | --- |
+| gyro detector alone | 0.29 | +1.1% |
+| CNN, old rule (peaks only) | 1.14 | −3.3% |
+| CNN, counting rule | 0.29 | +1.1% |
+
+The tie with the gyro detector is partly by construction: the edge steps come
+from it. The CNN still decides every step inside a walk, and whether there is a
+walk at all. `train.py` still picks its kept epoch with the peak count, so
+retraining gives the same model. With this few trials, differences of 1–2 steps
+are within noise. Full table:
 `models/step_detector/real/results.md`; plots:
 `docs/figures/step_detector/real/`. Timing F1 is left out because real
 trials have no true step times.

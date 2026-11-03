@@ -5,35 +5,42 @@ Trials: A_04, A_09, A_02, A_11, B_08, B_03, B_06. Confidence intervals (CI) are 
 
 ## 1. Step count
 
-Over all 7 test trials (180 steps counted by hand), the CNN was off by **1.14 steps per trial** on average (95% CI 0.57 to 1.86), and the gyro stride detector by **0.29** (95% CI 0.00 to 0.57). Bias (average of predicted − counted): CNN -0.86 steps, gyro +0.29. A negative bias means steps are missed; the CNN tends to miss a weak first or last step of a walk.
+Over all 7 test trials (180 steps counted by hand), the CNN was off by **0.29 steps per trial** on average (95% CI 0.00 to 0.57), and the gyro stride detector by **0.29** (95% CI 0.00 to 0.57). Bias (average of predicted − counted): CNN +0.29 steps, gyro +0.29. A negative bias means steps are missed.
 
-The plain sum of the CNN's output (what the count loss trains) is off by 0.39 steps per trial: the network gets the total about right, but a weak step's bump doesn't always reach the 0.5 needed to be counted as a peak. On these straight walks the plain gyro detector counts more accurately than the CNN; the CNN's advantage is ignoring non-steps (it counts sitting down as 0, where the gyro detector counts a stride).
+The CNN's steps are counted with the rule chosen on the training trials only (`analysis/counting_rule.md`). It counts the peaks of the CNN output, plus one step at the start or end of a walk when the gyro stride detector has a step there that the CNN missed. The CNN nearly always misses the last step of a walk: its output there is ~0, not a weak peak. With the old peaks-only rule the CNN was off by 1.14 steps per trial (bias -0.86). The plain sum of its output (what the count loss trains) is off by 0.39.
+
+On these straight walks the CNN and the plain gyro detector count equally well. The agreement is partly by construction: the edge steps come from the gyro detector. The CNN still decides every step inside a walk and whether there is a walk at all (it counts sitting down as 0, where the gyro detector counts a stride).
 
 Per trial:
 
-| trial | speed | counted | CNN | CNN sum of output | gyro detector | CNN, IMU only (ablation) |
-|---|---|---|---|---|---|---|
-| A_04 | fast | 30 | 29 | 30.00 | 30 | 30 |
-| A_09 | normal | 30 | 29 | 30.00 | 30 | 30 |
-| A_02 | slow | 30 | 27 | 28.80 | 30 | 30 |
-| A_11 | normal | 0 | 0 | 0.00 | 0 | 0 |
-| B_08 | fast | 12 | 13 | 12.60 | 12 | 12 |
-| B_03 | normal | 37 | 36 | 36.30 | 38 | 37 |
-| B_06 | slow | 41 | 40 | 41.20 | 42 | 40 |
+| trial | speed | counted | CNN | CNN, old rule | CNN sum of output | gyro detector | CNN, IMU only (ablation) |
+|---|---|---|---|---|---|---|---|
+| A_04 | fast | 30 | 30 | 29 | 30.00 | 30 | 31 |
+| A_09 | normal | 30 | 30 | 29 | 30.00 | 30 | 31 |
+| A_02 | slow | 30 | 30 | 27 | 28.80 | 30 | 31 |
+| A_11 | normal | 0 | 0 | 0 | 0.00 | 0 | 0 |
+| B_08 | fast | 12 | 13 | 13 | 12.60 | 12 | 13 |
+| B_03 | normal | 37 | 37 | 36 | 36.30 | 38 | 38 |
+| B_06 | slow | 41 | 42 | 40 | 41.20 | 42 | 41 |
 
 By speed:
 
 | speed | method | trials | steps counted | mean abs error (steps) | 95% CI | bias (steps) | bias 95% CI | SD (steps) | total error % |
 |---|---|---|---|---|---|---|---|---|---|
-| slow | CNN | 2 | 71 | 2.00 | 1.00 to 3.00 | -2.00 | -3.00 to -1.00 | 1.41 | -5.63 |
+| slow | CNN | 2 | 71 | 0.50 | 0.00 to 1.00 | 0.50 | 0.00 to 1.00 | 0.71 | 1.41 |
+| slow | CNN, old rule (peaks only) | 2 | 71 | 2.00 | 1.00 to 3.00 | -2.00 | -3.00 to -1.00 | 1.41 | -5.63 |
 | slow | gyro detector | 2 | 71 | 0.50 | 0.00 to 1.00 | 0.50 | 0.00 to 1.00 | 0.71 | 1.41 |
-| normal | CNN | 2 | 67 | 1.00 | 1.00 to 1.00 | -1.00 | -1.00 to -1.00 | 0.00 | -2.99 |
+| normal | CNN | 2 | 67 | 0.00 | 0.00 to 0.00 | 0.00 | 0.00 to 0.00 | 0.00 | 0.00 |
+| normal | CNN, old rule (peaks only) | 2 | 67 | 1.00 | 1.00 to 1.00 | -1.00 | -1.00 to -1.00 | 0.00 | -2.99 |
 | normal | gyro detector | 2 | 67 | 0.50 | 0.00 to 1.00 | 0.50 | 0.00 to 1.00 | 0.71 | 1.49 |
-| fast | CNN | 2 | 42 | 1.00 | 1.00 to 1.00 | 0.00 | -1.00 to 1.00 | 1.41 | 0.00 |
+| fast | CNN | 2 | 42 | 0.50 | 0.00 to 1.00 | 0.50 | 0.00 to 1.00 | 0.71 | 2.38 |
+| fast | CNN, old rule (peaks only) | 2 | 42 | 1.00 | 1.00 to 1.00 | 0.00 | -1.00 to 1.00 | 1.41 | 0.00 |
 | fast | gyro detector | 2 | 42 | 0.00 | 0.00 to 0.00 | 0.00 | 0.00 to 0.00 | 0.00 | 0.00 |
 | standing (0 steps) | CNN | 1 | 0 | 0.00 | n/a | 0.00 | n/a |  |  |
+| standing (0 steps) | CNN, old rule (peaks only) | 1 | 0 | 0.00 | n/a | 0.00 | n/a |  |  |
 | standing (0 steps) | gyro detector | 1 | 0 | 0.00 | n/a | 0.00 | n/a |  |  |
-| all | CNN | 7 | 180 | 1.14 | 0.57 to 1.86 | -0.86 | -1.71 to 0.00 | 1.21 | -3.33 |
+| all | CNN | 7 | 180 | 0.29 | 0.00 to 0.57 | 0.29 | 0.00 to 0.57 | 0.49 | 1.11 |
+| all | CNN, old rule (peaks only) | 7 | 180 | 1.14 | 0.57 to 1.86 | -0.86 | -1.71 to 0.00 | 1.21 | -3.33 |
 | all | gyro detector | 7 | 180 | 0.29 | 0.00 to 0.57 | 0.29 | 0.00 to 0.57 | 0.49 | 1.11 |
 
 ![predicted vs counted](../docs/figures/evaluation/val/step_scatter.png)
@@ -44,7 +51,7 @@ Data: all 8 A/B distance trials, each predicted by models fitted on the other 7 
 
 The step-length models never saw the trial they predict, but the CNN (used for "MLP on CNN steps") was trained on some of these walks, so that column is optimistic for them.
 
-Mean distance error: MLP **2.4%** (95% CI 1.6 to 3.4), Weinberg 2.5% (1.1 to 3.8), pendulum 4.0% (1.8 to 6.3), fixed step 6.6% (3.0 to 10.4). On the board the MLP runs on the CNN's steps instead of the gyro detector's: 4.0% (2.3 to 5.8), bias -1.4%.
+Mean distance error: MLP **2.4%** (95% CI 1.6 to 3.4), Weinberg 2.5% (1.1 to 3.8), pendulum 4.0% (1.8 to 6.3), fixed step 6.6% (3.0 to 10.4). On the board the MLP runs on the CNN's steps instead of the gyro detector's: 3.0% (1.4 to 4.9), bias +1.7%.
 
 The intervals of the MLP, Weinberg and pendulum overlap: with this many trials they can't be told apart. A fixed step length is clearly worse at slow and fast speeds, because step length changes with speed.
 
@@ -52,12 +59,12 @@ Per trial (distance error %):
 
 | trial | speed | distance_m | counted | gyro steps | CNN steps | fixed step | Weinberg | pendulum | MLP | MLP on CNN steps (board) |
 |---|---|---|---|---|---|---|---|---|---|---|
-| B_01 | normal | 19.00 | 24 | 24 | 23 | -0.88 | -1.14 | 2.40 | -1.83 | -5.52 |
-| B_02 | normal | 19.00 | 24 | 24 | 23 | -0.88 | 0.53 | -1.13 | -3.13 | -5.68 |
-| B_03 | normal | 30.00 | 37 | 38 | 36 | -0.57 | -0.60 | 0.82 | 0.82 | -2.94 |
-| B_04 | normal | 19.00 | 25 | 26 | 25 | 8.77 | 4.43 | 0.23 | 5.37 | 1.59 |
-| B_05 | slow | 19.00 | 25 | 25 | 24 | 3.88 | 0.25 | 3.27 | -1.45 | -4.96 |
-| B_06 | slow | 30.00 | 41 | 42 | 40 | 11.77 | 4.37 | 8.66 | 1.99 | -2.23 |
+| B_01 | normal | 19.00 | 24 | 24 | 24 | -0.88 | -1.14 | 2.40 | -1.83 | -1.86 |
+| B_02 | normal | 19.00 | 24 | 24 | 24 | -0.88 | 0.53 | -1.13 | -3.13 | -2.39 |
+| B_03 | normal | 30.00 | 37 | 38 | 37 | -0.57 | -0.60 | 0.82 | 0.82 | -0.50 |
+| B_04 | normal | 19.00 | 25 | 26 | 26 | 8.77 | 4.43 | 0.23 | 5.37 | 5.32 |
+| B_05 | slow | 19.00 | 25 | 25 | 26 | 3.88 | 0.25 | 3.27 | -1.45 | 2.09 |
+| B_06 | slow | 30.00 | 41 | 42 | 42 | 11.77 | 4.37 | 8.66 | 1.99 | 2.38 |
 | B_07 | fast | 19.00 | 23 | 22 | 22 | -10.09 | -3.16 | -7.72 | -1.58 | -0.40 |
 | B_08 | fast | 11.00 | 12 | 12 | 13 | -15.76 | -5.17 | -7.90 | 2.81 | 8.87 |
 
@@ -69,12 +76,12 @@ By speed:
 | slow | Weinberg | 2 | 2.31 | 0.3 to 4.4 | 2.31 | 0.3 to 4.4 |
 | slow | pendulum | 2 | 5.97 | 3.3 to 8.7 | 5.97 | 3.3 to 8.7 |
 | slow | MLP | 2 | 1.72 | 1.4 to 2.0 | 0.27 | -1.4 to 2.0 |
-| slow | MLP on CNN steps (board) | 2 | 3.59 | 2.2 to 5.0 | -3.59 | -5.0 to -2.2 |
+| slow | MLP on CNN steps (board) | 2 | 2.24 | 2.1 to 2.4 | 2.24 | 2.1 to 2.4 |
 | normal | fixed step | 4 | 2.78 | 0.6 to 6.8 | 1.61 | -0.9 to 6.4 |
 | normal | Weinberg | 4 | 1.68 | 0.6 to 3.5 | 0.80 | -0.9 to 3.2 |
 | normal | pendulum | 4 | 1.14 | 0.5 to 2.0 | 0.58 | -0.6 to 1.9 |
 | normal | MLP | 4 | 2.79 | 1.3 to 4.5 | 0.31 | -2.5 to 3.6 |
-| normal | MLP on CNN steps (board) | 4 | 3.93 | 2.3 to 5.6 | -3.14 | -5.6 to -0.2 |
+| normal | MLP on CNN steps (board) | 4 | 2.52 | 1.0 to 4.5 | 0.14 | -2.1 to 3.5 |
 | fast | fixed step | 2 | 12.92 | 10.1 to 15.8 | -12.92 | -15.8 to -10.1 |
 | fast | Weinberg | 2 | 4.16 | 3.2 to 5.2 | -4.16 | -5.2 to -3.2 |
 | fast | pendulum | 2 | 7.81 | 7.7 to 7.9 | -7.81 | -7.9 to -7.7 |
@@ -84,7 +91,7 @@ By speed:
 | all | Weinberg | 8 | 2.46 | 1.1 to 3.8 | -0.06 | -2.2 to 2.1 |
 | all | pendulum | 8 | 4.02 | 1.8 to 6.3 | -0.17 | -3.8 to 3.3 |
 | all | MLP | 8 | 2.37 | 1.6 to 3.4 | 0.38 | -1.4 to 2.3 |
-| all | MLP on CNN steps (board) | 8 | 4.02 | 2.3 to 5.8 | -1.41 | -4.2 to 2.0 |
+| all | MLP on CNN steps (board) | 8 | 2.98 | 1.4 to 4.9 | 1.69 | -0.6 to 4.3 |
 
 ![distance error by speed](../docs/figures/evaluation/val/distance_by_speed.png)
 
@@ -94,14 +101,14 @@ Each variant is trained exactly like the committed model (same split, settings a
 
 | model | inputs | mean abs error per seed | mean over seeds |
 |---|---|---|---|
-| step detector | IMU + ultrasonic | 1.14, 0.14, 1.14 steps | 0.81 steps (total -2.4%) |
-| step detector | IMU only | 0.14, 0.57, 0.43 steps | 0.38 steps (total -1.5%) |
+| step detector | IMU + ultrasonic | 0.29, 0.86, 0.29 steps | 0.48 steps (total +1.9%) |
+| step detector | IMU only | 0.71, 0.43, 0.00 steps | 0.38 steps (total +1.5%) |
 | step-length MLP | all 5 features | 2.4, 2.3, 2.4% distance | 2.4% |
 | step-length MLP | IMU features only | 3.7, 3.8, 3.9% distance | 3.8% |
 
-Paired difference per test trial, averaged over the seeds (IMU only − IMU + ultrasonic): absolute step error 95% CI -0.76 to -0.14 steps; absolute distance error -0.2 to 3.1 percentage points. A negative value means the variant without the ultrasonic did better; an interval that includes 0 means this data can't tell them apart.
+Paired difference per test trial, averaged over the seeds (IMU only − IMU + ultrasonic): absolute step error 95% CI -0.38 to 0.19 steps; absolute distance error -0.2 to 3.1 percentage points. A negative value means the variant without the ultrasonic did better; an interval that includes 0 means this data can't tell them apart.
 
-**Step detector:** on these trials it counted slightly better *without* the ultrasonic. The seeds vary as much as the variants do (one run of each is as good as the other's best), and these validation trials also chose the kept epoch, so this is weak evidence: the ultrasonic does not clearly help counting straight walks, where the gyro swing alone is a strong signal. Session C will say more.
+**Step detector:** this data can't tell whether the ultrasonic helps counting.
 
 **Step length:** without the ultrasonic features the distance error was higher in every seed (3.8% vs 2.4%), but the paired interval (-0.2 to 3.1 points) just includes 0: with this few trials that is suggestive, not proven.
 
@@ -112,23 +119,23 @@ Distance = number of steps × their lengths, so a missed or extra step moves the
 
 | trial | counted | gyro steps | gyro count err % | MLP distance err % | length-only err % | CNN steps | CNN count err % | board (CNN steps) distance err % |
 |---|---|---|---|---|---|---|---|---|
-| B_01 | 24 | 24 | 0.00 | -1.83 | -1.83 | 23 | -4.17 | -5.52 |
-| B_02 | 24 | 24 | 0.00 | -3.13 | -3.13 | 23 | -4.17 | -5.68 |
-| B_03 | 37 | 38 | 2.70 | 0.82 | -1.84 | 36 | -2.70 | -2.94 |
-| B_04 | 25 | 26 | 4.00 | 5.37 | 1.32 | 25 | 0.00 | 1.59 |
-| B_05 | 25 | 25 | 0.00 | -1.45 | -1.45 | 24 | -4.00 | -4.96 |
-| B_06 | 41 | 42 | 2.44 | 1.99 | -0.44 | 40 | -2.44 | -2.23 |
+| B_01 | 24 | 24 | 0.00 | -1.83 | -1.83 | 24 | 0.00 | -1.86 |
+| B_02 | 24 | 24 | 0.00 | -3.13 | -3.13 | 24 | 0.00 | -2.39 |
+| B_03 | 37 | 38 | 2.70 | 0.82 | -1.84 | 37 | 0.00 | -0.50 |
+| B_04 | 25 | 26 | 4.00 | 5.37 | 1.32 | 26 | 4.00 | 5.32 |
+| B_05 | 25 | 25 | 0.00 | -1.45 | -1.45 | 26 | 4.00 | 2.09 |
+| B_06 | 41 | 42 | 2.44 | 1.99 | -0.44 | 42 | 2.44 | 2.38 |
 | B_07 | 23 | 22 | -4.35 | -1.58 | 2.90 | 22 | -4.35 | -0.40 |
 | B_08 | 12 | 12 | 0.00 | 2.81 | 2.81 | 13 | 8.33 | 8.87 |
 
-Example: B_04 has 26 gyro steps for 25 counted (+4.0%), and its MLP distance error is +5.4%; rescaled to the right step count it would be +1.3%. On the board's path (CNN steps), step-count error and distance error are correlated (r = 0.93 over 8 trials): a step missed by the detector costs distance even if the step lengths are right.
+Example: B_04 has 26 gyro steps for 25 counted (+4.0%), and its MLP distance error is +5.4%; rescaled to the right step count it would be +1.3%. On the board's path (CNN steps), step-count error and distance error are correlated (r = 0.85 over 8 trials): a step missed by the detector costs distance even if the step lengths are right.
 
 ![count vs distance](../docs/figures/evaluation/val/count_vs_distance.png)
 
 
 ## 5. Limitations
 
-- **Walking only, straight paths only.** All training walks are straight hallway passes at slow, normal and fast speeds (no jogging trials were recorded). In a small room with turns (`bench_05`, 20 steps counted) the CNN found only **10** (the gyro detector 22): turning twists the thigh and breaks up the swing pattern it learned. Stairs, running and turning are not covered.
+- **Walking only, straight paths only.** All training walks are straight hallway passes at slow, normal and fast speeds (no jogging trials were recorded). In a small room with turns (`bench_05`, 20 steps counted) the CNN found only **15** (the gyro detector 22): turning twists the thigh and breaks up the swing pattern it learned. Stairs, running and turning are not covered.
 - **Small dataset.** 14 training and 7 validation trials; 8 distance trials. Per-speed results rest on 2-4 trials, hence the wide intervals; the ablation can only detect large effects.
 - **One person, one strap position, one hallway.** Everything was recorded by one person with the sensor just above the knee, mostly in one indoor hallway. Another body, gait, strap position or floor may need recalibration or more data.
 - **Hand counts as truth.** Counted steps can be off by one (the first or last step is ambiguous); distances were measured with a tape.
