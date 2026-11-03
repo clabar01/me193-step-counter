@@ -531,6 +531,13 @@ def main():
             every = all(x < y for x, y in zip(w, wo))
             if len_paired[0] > 0:
                 verdict = "the ultrasonic features help: the paired interval is above 0."
+            elif len_paired[1] < 0:
+                verdict = (f"the ultrasonic features made the distance clearly worse on these trials: without them "
+                           f"the error was {np.mean(wo):.1f}% vs {np.mean(w):.1f}%, lower in "
+                           + ("every seed" if all(y < x for x, y in zip(w, wo)) else "most seeds")
+                           + f", and the whole paired interval ({fmt_ci(len_paired, 1)} points) is below 0. "
+                           "The step-length MLP leans on the ultrasonic features, so a change in the echoes (clothing, "
+                           "sensor aim) carries straight into the step lengths.")
             elif every and len_paired[1] > 0:
                 verdict = (f"without the ultrasonic features the distance error was higher in every seed "
                            f"({np.mean(wo):.1f}% vs {np.mean(w):.1f}%), but the paired interval "
@@ -578,10 +585,10 @@ def main():
            "- **Live delay.** On the board a step is counted about 1.5 s after it happens (measured 1.34-1.72 s on "
            "the board's clock): the CNN needs 1.2 s of data after each step. The public MQTT broker added another "
            "0.7-4.7 s on the evening it was measured, so the dashboard can lag 2-6 s.",
-           "- **Validation as a stand-in.** " + ("These numbers use the validation trials, which also picked the kept "
-                                                  "training epoch: expect Session C to be somewhat worse."
-                                                  if args.test == "val" else "Session C was never used for training or "
-                                                  "model selection, so these are honest test numbers."),
+           ("- **Validation as a stand-in.** These numbers use the validation trials, which also picked the kept "
+            "training epoch: expect Session C to be somewhat worse." if args.test == "val" else
+            "- **Held-out test set.** Session C was never used for training or model selection, so these are honest "
+            "test numbers. With 6 trials (2 per speed) the intervals are still wide."),
            ]
     out += lim
     (REPO / "analysis" / "results.md").write_text("\n".join(out) + "\n")
